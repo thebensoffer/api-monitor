@@ -62,6 +62,38 @@ npm run dev
 
 Dashboard will be available at: http://localhost:3000
 
+### 5. Run Performance Monitoring (Week 1 Feature)
+```bash
+# Manual performance audit
+npm run monitor:performance
+
+# Or via API (with API key header)
+curl -X POST http://localhost:3000/api/performance/monitor \
+  -H "x-monitor-key: your-api-key"
+```
+
+## Usage
+
+### Performance Monitoring (Week 1 ✅)
+
+The system automatically monitors Core Web Vitals for:
+- **DK:** `https://discreetketamine.com`  
+- **DK:** `https://discreetketamine.com/at-home-ketamine-therapy`
+- **DK:** `https://discreetketamine.com/ketamine-cost`
+- **DBS:** `https://drbensoffer.com`
+- **DBS:** `https://drbensoffer.com/concierge-medicine-tax-deduction`
+
+**Automated alerting triggers:**
+- LCP > 4 seconds (high severity)
+- Performance score < 70 (medium severity)  
+- Mobile/desktop gap > 30 points (medium severity)
+- Any metric in "poor" range (critical severity)
+
+**Dashboard access:**
+- Main overview: `/dashboard`
+- Performance details: `/dashboard/performance`
+- Run manual audits via UI buttons
+
 ## API Key Usage
 
 All API routes and dashboard pages require the API key header:
@@ -97,22 +129,33 @@ The heartbeat system continues to send WhatsApp alerts while the dashboard provi
 
 ## Development Roadmap
 
-### Week 1: Foundation ✅
+### Week 1: Foundation + Performance Monitoring ✅
 - [x] Basic Amplify app structure
 - [x] DynamoDB integration  
 - [x] API key authentication
 - [x] Simple dashboard UI
+- [x] **PageSpeed Insights API integration**
+- [x] **Chrome UX Report API integration**
+- [x] **Core Web Vitals dashboard**
+- [x] **Performance alerting system**
+- [x] **Automated monitoring scripts**
 
-### Week 2: Core Monitoring
+### Week 2: Core Monitoring + Stripe Integration
 - [ ] DK API instrumentation
 - [ ] DBS API integration
+- [ ] **Stripe revenue analysis**
+- [ ] **True ROI per marketing channel**
+- [ ] **Patient LTV tracking**
 - [ ] Real-time activity feed
 - [ ] Basic performance metrics
 
-### Week 3: External Services
+### Week 3: External Services + Ahrefs
 - [ ] GSC/GA4 integration
 - [ ] Sentry monitoring
 - [ ] Amplify build tracking
+- [ ] **Ahrefs competitor analysis**
+- [ ] **Weekly keyword rank tracking**
+- [ ] **Backlink opportunity identification**
 - [ ] Enhanced alerting
 
 ### Week 4: Advanced Features  
@@ -120,3 +163,31 @@ The heartbeat system continues to send WhatsApp alerts while the dashboard provi
 - [ ] Analytics engine
 - [ ] Mobile optimizations
 - [ ] Team role management
+
+## API Requirements
+
+### Google APIs (Week 1 Complete)
+
+For **PageSpeed Insights** and **Chrome UX Report**, you need a Google API key for higher quotas:
+
+1. **Go to:** [Google Cloud Console](https://console.cloud.google.com/)
+2. **Create project** or select existing
+3. **Enable APIs:**
+   - PageSpeed Insights API
+   - Chrome UX Report API  
+4. **Create credentials** → API Key
+5. **Add to `.env.local`:**
+   ```
+   GOOGLE_API_KEY=your-google-api-key-here
+   ```
+
+**Free tier limits:**
+- PageSpeed Insights: 5 requests per minute
+- Chrome UX Report: 150 requests per day
+
+**With API key:**
+- PageSpeed Insights: 25 requests per minute  
+- Chrome UX Report: 25,000 requests per day
+
+### Stripe Integration (Week 2 - You Already Have Access)
+Your existing Stripe keys will be used for revenue analysis.
