@@ -7,7 +7,8 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "setup:tables": "npx tsx scripts/create-tables.ts"
+    "setup:tables": "npx tsx scripts/create-tables.ts",
+    "monitor:performance": "npx tsx scripts/performance-monitor.ts"
   },
   "dependencies": {
     "@aws-sdk/client-dynamodb": "^3.1008.0",
@@ -15,6 +16,7 @@
     "aws-sdk": "^2.1693.0",
     "date-fns": "^4.1.0",
     "next": "16.1.6",
+    "node-fetch": "^3.3.2",
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "uuid": "^13.0.0"
