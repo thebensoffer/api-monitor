@@ -14,16 +14,17 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
-  const latest = getAllLatest();
-
-  const crons = CRON_REGISTRY.map((c) => ({
-    id: c.id,
-    group: c.group,
-    schedule: c.schedule,
-    description: c.description,
-    lastRun: latest[c.id] ?? null,
-    history: getRuns(c.id),
-  }));
+  const latest = await getAllLatest();
+  const crons = await Promise.all(
+    CRON_REGISTRY.map(async (c) => ({
+      id: c.id,
+      group: c.group,
+      schedule: c.schedule,
+      description: c.description,
+      lastRun: latest[c.id] ?? null,
+      history: await getRuns(c.id),
+    }))
+  );
 
   const summary = {
     total: crons.length,

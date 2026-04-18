@@ -16,7 +16,8 @@ frontend:
                        TOVANI_KHAI_API_KEY GOOGLE_API_KEY \
                        GOOGLE_APPLICATION_CREDENTIALS_JSON \
                        GA4_PROPERTY_ID_DK GA4_PROPERTY_ID_DBS \
-                       OPENHEART_AWS_ACCESS_KEY_ID OPENHEART_AWS_SECRET_ACCESS_KEY OPENHEART_AWS_REGION; do
+                       OPENHEART_AWS_ACCESS_KEY_ID OPENHEART_AWS_SECRET_ACCESS_KEY OPENHEART_AWS_REGION \
+                       OPENHEART_SELF_URL OPENHEART_BASIC_AUTH OPENHEART_CRON_TABLE GA4_PROPERTY_ID_TOVANI; do
               if [ -n "${!var}" ]; then echo "${var}=${!var}"; fi
             done
           } > .env.production

@@ -75,7 +75,11 @@ export async function GET(
     data: result.data,
     error,
   };
-  recordRun(run);
+  try {
+    await recordRun(run);
+  } catch (e) {
+    console.error('[cron] recordRun failed', e);
+  }
 
   return NextResponse.json(run, { status: result.ok ? 200 : 500 });
 }

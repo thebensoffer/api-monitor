@@ -17,6 +17,24 @@
 import { probe } from './probe';
 import tls from 'node:tls';
 
+// Self-fetch base URL — defaults to deployed Amplify URL on prod, localhost on dev.
+function selfBase(): string {
+  return (
+    process.env.OPENHEART_SELF_URL ||
+    process.env.OPENHEART_URL ||
+    'http://localhost:3000'
+  );
+}
+function selfHeaders(): Record<string, string> {
+  const h: Record<string, string> = {
+    'x-monitor-key': process.env.MONITOR_API_KEY || '',
+  };
+  // Forward Amplify basic-auth so self-fetches survive the gate
+  const basic = process.env.OPENHEART_BASIC_AUTH;
+  if (basic) h['Authorization'] = `Basic ${basic}`;
+  return h;
+}
+
 export interface CronContext {
   triggeredAt: string;
   source: 'eventbridge' | 'manual' | 'dispatcher';
@@ -95,9 +113,7 @@ export const CRON_REGISTRY: CronDef[] = [
     description: 'Polls AWS Amplify build status for all monitored apps; alerts on FAILED builds.',
     handler: async () => {
       // Lightweight stub: hit the existing /api/builds endpoint internally.
-      const r = await fetch('http://localhost:3000/api/builds', {
-        headers: { 'x-monitor-key': process.env.MONITOR_API_KEY || '' },
-      });
+      const r = await fetch(`${selfBase()}/api/builds`, { headers: selfHeaders() });
       const ok = r.ok;
       const body = ok ? await r.json() : null;
       return {
@@ -240,9 +256,7 @@ export const CRON_REGISTRY: CronDef[] = [
     schedule: 'cron(0 12 * * ? *)',
     description: 'Daily 12:00 UTC ops digest — health rollup, alerts, deploys, errors.',
     handler: async () => {
-      const r = await fetch('http://localhost:3000/api/status', {
-        headers: { 'x-monitor-key': process.env.MONITOR_API_KEY || '' },
-      });
+      const r = await fetch(`${selfBase()}/api/status`, { headers: selfHeaders() });
       const status = r.ok ? await r.json() : null;
       return {
         ok: r.ok,
@@ -259,9 +273,7 @@ export const CRON_REGISTRY: CronDef[] = [
     schedule: 'cron(0 23 * * ? *)',
     description: 'Daily 23:00 UTC end-of-day summary — same shape as morning briefing.',
     handler: async () => {
-      const r = await fetch('http://localhost:3000/api/status', {
-        headers: { 'x-monitor-key': process.env.MONITOR_API_KEY || '' },
-      });
+      const r = await fetch(`${selfBase()}/api/status`, { headers: selfHeaders() });
       const status = r.ok ? await r.json() : null;
       return {
         ok: r.ok,
@@ -278,9 +290,7 @@ export const CRON_REGISTRY: CronDef[] = [
     schedule: 'cron(0 11 ? * MON *)',
     description: 'Weekly Google Search Console snapshot; archives queries/clicks/impressions.',
     handler: async () => {
-      const r = await fetch('http://localhost:3000/api/gsc-data?range=7d&site=both', {
-        headers: { 'x-monitor-key': process.env.MONITOR_API_KEY || '' },
-      });
+      const r = await fetch(`${selfBase()}/api/gsc-data?range=7d&site=both`, { headers: selfHeaders() });
       const ok = r.ok;
       return {
         ok,
