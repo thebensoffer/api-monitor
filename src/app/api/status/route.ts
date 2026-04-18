@@ -70,9 +70,9 @@ export async function GET(_request: NextRequest) {
       url: 'http://localhost:3000/api/gsc-data?range=7d&site=both',
       headers: { 'x-monitor-key': process.env.MONITOR_API_KEY || '' },
     }),
-    probe({ endpoint: 'stripe-status', url: 'https://status.stripe.com/api/v2/status.json' }),
+    probe({ endpoint: 'stripe-status', url: 'https://www.stripestatus.com/api/v2/status.json' }),
     probe({ endpoint: 'twilio-status', url: 'https://status.twilio.com/api/v2/status.json' }),
-    probe({ endpoint: 'resend-status', url: 'https://resend-status.com/api/v2/status.json' }),
+    probe({ endpoint: 'resend-status', url: 'https://status.resend.com/api/v2/status.json' }),
   ]);
 
   // Map status.io-style "indicator" -> our status enum

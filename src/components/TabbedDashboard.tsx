@@ -11,6 +11,7 @@ import { ServiceDrillRow } from './ServiceDrillRow';
 import { CronsPanel } from './CronsPanel';
 import { QuickLinks } from './QuickLinks';
 import { LiveOperationsCard } from './LiveOperationsCard';
+import { GscSiteCard } from './GscSiteCard';
 
 interface ServiceStatus {
   key: string;
@@ -861,174 +862,35 @@ export function TabbedDashboard() {
                 </div>
               )}
 
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                {/* DK Search Performance */}
-                <div>
-                  <h4 className="font-medium mb-4 text-blue-800 flex items-center">
-                    🚀 DK Search Performance
-                    <span className="ml-2 text-xs bg-green-100 text-green-700 px-2 py-1 rounded-full">
-                      ✅ Indexed
-                    </span>
-                  </h4>
-                  
-                  {/* Summary Stats */}
-                  <div className="grid grid-cols-2 gap-3 mb-4">
-                    <div className="bg-blue-50 p-3 rounded-lg text-center">
-                      <div className="text-xl font-bold text-blue-600">
-                        {gscData.dk?.totalClicks?.toLocaleString() || '0'}
-                      </div>
-                      <div className="text-xs text-blue-700">Total Clicks</div>
-                    </div>
-                    <div className="bg-gray-50 p-3 rounded-lg text-center">
-                      <div className="text-xl font-bold text-gray-600">
-                        {gscData.dk?.totalImpressions?.toLocaleString() || '0'}
-                      </div>
-                      <div className="text-xs text-gray-700">Impressions</div>
-                    </div>
-                    <div className="bg-green-50 p-3 rounded-lg text-center">
-                      <div className="text-lg font-bold text-green-600">
-                        {gscData.dk?.averageCtr || '0%'}
-                      </div>
-                      <div className="text-xs text-green-700">Avg CTR</div>
-                    </div>
-                    <div className="bg-purple-50 p-3 rounded-lg text-center">
-                      <div className="text-lg font-bold text-purple-600">
-                        {gscData.dk?.averagePosition || '0'}
-                      </div>
-                      <div className="text-xs text-purple-700">Avg Position</div>
-                    </div>
-                  </div>
-
-                  {/* Top Queries */}
-                  {gscData.dk?.topQueries && gscData.dk.topQueries.length > 0 && (
-                    <div className="mb-4">
-                      <h5 className="text-sm font-medium text-gray-900 mb-2">🔍 Top Search Queries</h5>
-                      <div className="space-y-2 max-h-40 overflow-y-auto">
-                        {gscData.dk.topQueries.slice(0, 5).map((query: any, index: number) => (
-                          <div key={index} className="flex justify-between items-center text-xs p-2 bg-gray-50 rounded">
-                            <span className="font-medium truncate flex-1 mr-2">{query.query}</span>
-                            <div className="flex space-x-2 text-gray-600">
-                              <span>{query.clicks}c</span>
-                              <span>{query.ctr}</span>
-                              <span>#{query.position}</span>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Top Pages */}
-                  {gscData.dk?.topPages && gscData.dk.topPages.length > 0 && (
-                    <div>
-                      <h5 className="text-sm font-medium text-gray-900 mb-2">📄 Top Landing Pages</h5>
-                      <div className="space-y-2 max-h-32 overflow-y-auto">
-                        {gscData.dk.topPages.slice(0, 4).map((page: any, index: number) => (
-                          <div key={index} className="flex justify-between items-center text-xs p-2 bg-gray-50 rounded">
-                            <span className="font-medium truncate flex-1 mr-2">{page.page}</span>
-                            <div className="flex space-x-2 text-gray-600">
-                              <span>{page.clicks}c</span>
-                              <span>{page.ctr}</span>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                {/* DBS Search Performance */}
-                <div>
-                  <h4 className="font-medium mb-4 text-emerald-800 flex items-center">
-                    🏥 DBS Search Performance  
-                    <span className="ml-2 text-xs bg-green-100 text-green-700 px-2 py-1 rounded-full">
-                      ✅ Indexed
-                    </span>
-                  </h4>
-                  
-                  {/* Summary Stats */}
-                  <div className="grid grid-cols-2 gap-3 mb-4">
-                    <div className="bg-emerald-50 p-3 rounded-lg text-center">
-                      <div className="text-xl font-bold text-emerald-600">
-                        {gscData.dbs?.totalClicks?.toLocaleString() || '0'}
-                      </div>
-                      <div className="text-xs text-emerald-700">Total Clicks</div>
-                    </div>
-                    <div className="bg-gray-50 p-3 rounded-lg text-center">
-                      <div className="text-xl font-bold text-gray-600">
-                        {gscData.dbs?.totalImpressions?.toLocaleString() || '0'}
-                      </div>
-                      <div className="text-xs text-gray-700">Impressions</div>
-                    </div>
-                    <div className="bg-green-50 p-3 rounded-lg text-center">
-                      <div className="text-lg font-bold text-green-600">
-                        {gscData.dbs?.averageCtr || '0%'}
-                      </div>
-                      <div className="text-xs text-green-700">Avg CTR</div>
-                    </div>
-                    <div className="bg-purple-50 p-3 rounded-lg text-center">
-                      <div className="text-lg font-bold text-purple-600">
-                        {gscData.dbs?.averagePosition || '0'}
-                      </div>
-                      <div className="text-xs text-purple-700">Avg Position</div>
-                    </div>
-                  </div>
-
-                  {/* Top Queries */}
-                  {gscData.dbs?.topQueries && gscData.dbs.topQueries.length > 0 && (
-                    <div className="mb-4">
-                      <h5 className="text-sm font-medium text-gray-900 mb-2">🔍 Top Search Queries</h5>
-                      <div className="space-y-2 max-h-40 overflow-y-auto">
-                        {gscData.dbs.topQueries.slice(0, 5).map((query: any, index: number) => (
-                          <div key={index} className="flex justify-between items-center text-xs p-2 bg-gray-50 rounded">
-                            <span className="font-medium truncate flex-1 mr-2">{query.query}</span>
-                            <div className="flex space-x-2 text-gray-600">
-                              <span>{query.clicks}c</span>
-                              <span>{query.ctr}</span>
-                              <span>#{query.position}</span>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Top Pages */}
-                  {gscData.dbs?.topPages && gscData.dbs.topPages.length > 0 && (
-                    <div>
-                      <h5 className="text-sm font-medium text-gray-900 mb-2">📄 Top Landing Pages</h5>
-                      <div className="space-y-2 max-h-32 overflow-y-auto">
-                        {gscData.dbs.topPages.slice(0, 4).map((page: any, index: number) => (
-                          <div key={index} className="flex justify-between items-center text-xs p-2 bg-gray-50 rounded">
-                            <span className="font-medium truncate flex-1 mr-2">{page.page}</span>
-                            <div className="flex space-x-2 text-gray-600">
-                              <span>{page.clicks}c</span>
-                              <span>{page.ctr}</span>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                <GscSiteCard siteKey="dk" label="DK" data={gscData.dk} />
+                <GscSiteCard siteKey="dbs" label="DBS" data={gscData.dbs} />
+                <GscSiteCard siteKey="tovani" label="Tovani" data={gscData.tovani} />
               </div>
 
               {/* Indexing Status Summary */}
               <div className="mt-6 pt-4 border-t border-gray-200">
                 <h5 className="font-medium text-gray-900 mb-3">📊 Search Coverage Status</h5>
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                   <div className="bg-blue-50 p-3 rounded-lg">
                     <div className="font-medium text-blue-800 mb-1">🚀 DK Coverage</div>
                     <div className="text-sm text-blue-700">
-                      Valid pages: {gscData.dk?.indexing_status?.valid_pages || 'N/A'} • 
+                      Valid pages: {gscData.dk?.indexing_status?.valid_pages || 'N/A'} •
                       Issues: {gscData.dk?.indexing_status?.coverage_issues || 0}
                     </div>
                   </div>
                   <div className="bg-emerald-50 p-3 rounded-lg">
                     <div className="font-medium text-emerald-800 mb-1">🏥 DBS Coverage</div>
                     <div className="text-sm text-emerald-700">
-                      Valid pages: {gscData.dbs?.indexing_status?.valid_pages || 'N/A'} • 
+                      Valid pages: {gscData.dbs?.indexing_status?.valid_pages || 'N/A'} •
                       Issues: {gscData.dbs?.indexing_status?.coverage_issues || 0}
+                    </div>
+                  </div>
+                  <div className="bg-indigo-50 p-3 rounded-lg">
+                    <div className="font-medium text-indigo-800 mb-1">🩺 Tovani Coverage</div>
+                    <div className="text-sm text-indigo-700">
+                      Valid pages: {gscData.tovani?.indexing_status?.valid_pages || 'N/A'} •
+                      Issues: {gscData.tovani?.indexing_status?.coverage_issues || 0}
                     </div>
                   </div>
                 </div>

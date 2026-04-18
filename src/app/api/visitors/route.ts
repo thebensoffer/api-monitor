@@ -32,20 +32,24 @@ export async function GET(request: NextRequest) {
     };
 
     async function realtime(propertyId: string) {
-      const [res] = await client.runRealtimeReport({
-        property: `properties/${propertyId}`,
-        dimensions: [{ name: 'country' }, { name: 'city' }, { name: 'deviceCategory' }, { name: 'unifiedScreenName' }],
-        metrics: [{ name: 'activeUsers' }],
-      });
-      const rows = (res.rows || []).map((r) => ({
-        country: r.dimensionValues?.[0]?.value || 'Unknown',
-        city: r.dimensionValues?.[1]?.value || 'Unknown',
-        device: r.dimensionValues?.[2]?.value || 'Unknown',
-        page: r.dimensionValues?.[3]?.value || 'Unknown',
-        activeUsers: parseInt(r.metricValues?.[0]?.value || '0', 10),
-      }));
-      const total = rows.reduce((s, r) => s + r.activeUsers, 0);
-      return { total, rows };
+      try {
+        const [res] = await client.runRealtimeReport({
+          property: `properties/${propertyId}`,
+          dimensions: [{ name: 'country' }, { name: 'city' }, { name: 'deviceCategory' }, { name: 'unifiedScreenName' }],
+          metrics: [{ name: 'activeUsers' }],
+        });
+        const rows = (res.rows || []).map((r) => ({
+          country: r.dimensionValues?.[0]?.value || 'Unknown',
+          city: r.dimensionValues?.[1]?.value || 'Unknown',
+          device: r.dimensionValues?.[2]?.value || 'Unknown',
+          page: r.dimensionValues?.[3]?.value || 'Unknown',
+          activeUsers: parseInt(r.metricValues?.[0]?.value || '0', 10),
+        }));
+        const total = rows.reduce((s, r) => s + r.activeUsers, 0);
+        return { total, rows, error: null as string | null };
+      } catch (err) {
+        return { total: 0, rows: [], error: err instanceof Error ? err.message : 'GA4 error' };
+      }
     }
 
     const [dkRT, dbsRT, tovaniRT] = await Promise.all([
@@ -54,15 +58,18 @@ export async function GET(request: NextRequest) {
       realtime(properties.tovani),
     ]);
 
-    // Also query the last-hour and last-24h session counts so the UI has more than "right now"
     async function recent(propertyId: string) {
-      const [res] = await client.runReport({
-        property: `properties/${propertyId}`,
-        dateRanges: [{ startDate: '1daysAgo', endDate: 'today' }],
-        metrics: [{ name: 'sessions' }, { name: 'activeUsers' }, { name: 'newUsers' }],
-      });
-      const [sessions, users, newUsers] = (res.rows?.[0]?.metricValues || []).map((m) => parseInt(m.value || '0', 10));
-      return { sessions: sessions ?? 0, users: users ?? 0, newUsers: newUsers ?? 0 };
+      try {
+        const [res] = await client.runReport({
+          property: `properties/${propertyId}`,
+          dateRanges: [{ startDate: '1daysAgo', endDate: 'today' }],
+          metrics: [{ name: 'sessions' }, { name: 'activeUsers' }, { name: 'newUsers' }],
+        });
+        const [sessions, users, newUsers] = (res.rows?.[0]?.metricValues || []).map((m) => parseInt(m.value || '0', 10));
+        return { sessions: sessions ?? 0, users: users ?? 0, newUsers: newUsers ?? 0, error: null as string | null };
+      } catch (err) {
+        return { sessions: 0, users: 0, newUsers: 0, error: err instanceof Error ? err.message : 'GA4 error' };
+      }
     }
     const [dkRecent, dbsRecent, tovaniRecent] = await Promise.all([
       recent(properties.dk),
