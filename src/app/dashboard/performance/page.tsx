@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import { DashboardNav } from '@/components/DashboardNav';
 import { PerformanceAudit, CoreWebVitals } from '@/types/performance';
 
 interface PerformanceRecord {
@@ -157,8 +158,9 @@ export default function PerformanceDashboard() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50 p-6">
-      <div className="max-w-7xl mx-auto">
+    <div className="min-h-screen bg-gray-50">
+      <DashboardNav />
+      <div className="max-w-7xl mx-auto py-6 px-4 sm:px-6 lg:px-8">
         {/* Header */}
         <div className="mb-8">
           <div className="flex justify-between items-center">

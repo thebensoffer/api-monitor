@@ -13,7 +13,7 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "API Monitor - Medical Practice Command Center",
+  title: "OpenHeart - Medical Practice Command Center",
   description: "Unified monitoring for DK + DBS medical practice operations - API calls, performance metrics, and real-time alerts",
 };
 

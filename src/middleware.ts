@@ -1,10 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 export function middleware(request: NextRequest) {
-  // Only protect API routes and dashboard pages
-  if (request.nextUrl.pathname.startsWith('/api') || 
-      request.nextUrl.pathname.startsWith('/dashboard')) {
-    
+  // Only protect API routes, not dashboard UI
+  if (request.nextUrl.pathname.startsWith('/api')) {
     const apiKey = request.headers.get('x-monitor-key');
     const expectedKey = process.env.MONITOR_API_KEY;
     
@@ -17,5 +15,5 @@ export function middleware(request: NextRequest) {
 }
 
 export const config = {
-  matcher: ['/api/:path*', '/dashboard/:path*']
+  matcher: ['/api/:path*']
 };
