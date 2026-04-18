@@ -10,6 +10,7 @@ import { NetworkChecksPanel } from './NetworkChecksPanel';
 import { UserFlowsPanel } from './UserFlowsPanel';
 import { ServiceDrillRow } from './ServiceDrillRow';
 import { CronsPanel } from './CronsPanel';
+import { QuickLinks } from './QuickLinks';
 
 interface ServiceStatus {
   key: string;
@@ -337,6 +338,9 @@ export function TabbedDashboard() {
       {/* Tab Content */}
       {activeTab === 'overview' && (
         <div className="space-y-6">
+          {/* Quick links to the apps OpenHeart monitors */}
+          <QuickLinks />
+
           {/* Summary Cards - Now Fully Functional */}
           <div className="grid grid-cols-1 gap-5 sm:grid-cols-2 lg:grid-cols-4">
             {/* Services Online Card - Clickable */}

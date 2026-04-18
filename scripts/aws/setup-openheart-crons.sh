@@ -7,6 +7,8 @@
 # Required env:
 #   OPENHEART_URL    Base URL of deployed OpenHeart (e.g. https://openheart.example.com)
 #   CRON_SECRET      Shared secret the dispatcher checks
+# Optional env:
+#   BASIC_AUTH       base64("user:pass") if Amplify basic-auth gate is enabled
 #   AWS_REGION       defaults to us-east-1
 #
 # Usage:
@@ -71,13 +73,16 @@ cat > "$TMP/index.js" <<'EOF'
 exports.handler = async (event) => {
   const url = process.env.OPENHEART_URL;
   const secret = process.env.CRON_SECRET;
+  const basicAuth = process.env.BASIC_AUTH; // base64 of "user:pass" if Amplify basic-auth is on
   const cronId = event.cronId;
   if (!cronId) throw new Error('event.cronId is required');
   const target = `${url}/api/cron/${cronId}`;
-  const res = await fetch(target, {
-    method: 'GET',
-    headers: { 'x-cron-secret': secret, 'User-Agent': 'OpenHeart-EventBridge/1.0' },
-  });
+  const headers = {
+    'x-cron-secret': secret,
+    'User-Agent': 'OpenHeart-EventBridge/1.0',
+  };
+  if (basicAuth) headers['Authorization'] = `Basic ${basicAuth}`;
+  const res = await fetch(target, { method: 'GET', headers });
   const body = await res.text();
   console.log(`[${cronId}] HTTP ${res.status} — ${body.slice(0, 500)}`);
   if (!res.ok) throw new Error(`Cron ${cronId} returned HTTP ${res.status}: ${body.slice(0, 200)}`);
@@ -94,15 +99,16 @@ run "aws lambda create-function \
   --role ${ROLE_ARN} \
   --zip-file fileb://${TMP}/openheart-cron.zip \
   --timeout 60 \
-  --environment 'Variables={OPENHEART_URL=${OPENHEART_URL},CRON_SECRET=${CRON_SECRET}}' \
+  --environment 'Variables={OPENHEART_URL=${OPENHEART_URL},CRON_SECRET=${CRON_SECRET},BASIC_AUTH=${BASIC_AUTH:-}}' \
   --region ${REGION} 2>/dev/null || \
 aws lambda update-function-code \
   --function-name ${FUNCTION_NAME} \
   --zip-file fileb://${TMP}/openheart-cron.zip \
   --region ${REGION} 2>/dev/null"
+sleep 3
 run "aws lambda update-function-configuration \
   --function-name ${FUNCTION_NAME} \
-  --environment 'Variables={OPENHEART_URL=${OPENHEART_URL},CRON_SECRET=${CRON_SECRET}}' \
+  --environment 'Variables={OPENHEART_URL=${OPENHEART_URL},CRON_SECRET=${CRON_SECRET},BASIC_AUTH=${BASIC_AUTH:-}}' \
   --region ${REGION} 2>/dev/null || true"
 
 LAMBDA_ARN=$(aws lambda get-function --function-name "${FUNCTION_NAME}" --query 'Configuration.FunctionArn' --output text 2>/dev/null || echo "DRY-RUN-LAMBDA-ARN")
@@ -126,10 +132,13 @@ for entry in "${CRONS[@]}"; do
     --principal events.amazonaws.com \
     --source-arn arn:aws:events:${REGION}:${ACCOUNT_ID}:rule/${RULE} \
     --region ${REGION} 2>/dev/null || true"
-  run "aws events put-targets \
-    --rule '${RULE}' \
-    --targets 'Id=1,Arn=${LAMBDA_ARN},Input={\"cronId\":\"${ID}\"}' \
-    --region ${REGION} >/dev/null"
+  # Use a JSON file to avoid bash quoting hell with --targets
+  TF=$(mktemp)
+  cat > "$TF" <<JSON
+[{"Id":"1","Arn":"${LAMBDA_ARN}","Input":"{\"cronId\":\"${ID}\"}"}]
+JSON
+  run "aws events put-targets --rule '${RULE}' --targets file://${TF} --region ${REGION} >/dev/null"
+  rm -f "$TF"
 done
 
 rm -rf "$TMP"
