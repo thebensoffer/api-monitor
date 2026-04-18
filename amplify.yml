@@ -4,6 +4,20 @@ frontend:
     preBuild:
       commands:
         - npm ci --legacy-peer-deps
+        # Forward Amplify-injected env vars to the Next.js SSR runtime.
+        # Amplify only passes app/branch env to the build container by default;
+        # writing them to .env.production lets next build inline them so the
+        # SSR Lambda sees process.env.* at request time.
+        - |
+          {
+            for var in MONITOR_API_KEY NEXT_PUBLIC_MONITOR_API_KEY CRON_SECRET \
+                       SENTRY_AUTH_TOKEN DK_API_KEY DBS_API_KEY \
+                       TOVANI_BASE_URL TOVANI_HEALTH_URL TOVANI_SYSTEM_HEALTH_URL TOVANI_COMMS_URL \
+                       TOVANI_KHAI_API_KEY GOOGLE_API_KEY; do
+              if [ -n "${!var}" ]; then echo "${var}=${!var}"; fi
+            done
+          } > .env.production
+          echo "wrote $(wc -l < .env.production) env vars to .env.production"
     build:
       commands:
         - npm run build
