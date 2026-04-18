@@ -5,7 +5,6 @@ import { useEffect, useState } from 'react';
 import { TimePeriodSelector } from './TimePeriodSelector';
 import { AnalyticsCharts } from './AnalyticsCharts';
 import { ServicesListModal, PerformanceModal } from './DetailModals';
-import { TovaniHealthPanel } from './TovaniHealthPanel';
 import { NetworkChecksPanel } from './NetworkChecksPanel';
 import { UserFlowsPanel } from './UserFlowsPanel';
 import { ServiceDrillRow } from './ServiceDrillRow';
@@ -256,16 +255,15 @@ export function TabbedDashboard() {
 
   const tabs = [
     { id: 'overview', name: 'System Overview', icon: '📊' },
-    { id: 'tovani', name: 'Tovani Health', icon: '🩺' },
-    { id: 'crons', name: 'Crons', icon: '⏰' },
-    { id: 'flows', name: 'User Flows', icon: '🧭' },
-    { id: 'network', name: 'TLS & DNS', icon: '🔐' },
     { id: 'analytics', name: 'Analytics & Traffic', icon: '📈' },
     { id: 'performance', name: 'Performance', icon: '⚡' },
+    { id: 'flows', name: 'User Flows', icon: '🧭' },
+    { id: 'crons', name: 'Crons', icon: '⏰' },
+    { id: 'network', name: 'TLS & DNS', icon: '🔐' },
     { id: 'logs', name: 'Live Logs', icon: '📝' },
     { id: 'errors', name: 'Error Monitoring', icon: '🐛' },
     { id: 'builds', name: 'Deployments', icon: '🚀' },
-    { id: 'business', name: 'Business Alerts', icon: '💼' }
+    { id: 'business', name: 'Business Alerts', icon: '💼' },
   ];
 
   if (loading && !statusData) {
@@ -561,10 +559,6 @@ export function TabbedDashboard() {
         </div>
       )}
 
-      {activeTab === 'tovani' && (
-        <TovaniHealthPanel />
-      )}
-
       {activeTab === 'crons' && (
         <CronsPanel />
       )}
@@ -584,7 +578,7 @@ export function TabbedDashboard() {
               📈 Analytics & Traffic Overview (Last 7 Days)
             </h3>
             {analyticsData ? (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
                 <div>
                   <h4 className="font-medium mb-3 text-blue-800">🚀 DK Performance</h4>
                   <div className="space-y-3">
@@ -624,6 +618,27 @@ export function TabbedDashboard() {
                     <div className="flex justify-between py-2">
                       <span>Conversion Rate:</span>
                       <span className="font-semibold text-green-600">{analyticsData.dbs?.conversionRate || 'N/A'}</span>
+                    </div>
+                  </div>
+                </div>
+                <div>
+                  <h4 className="font-medium mb-3 text-indigo-800">🩺 Tovani Performance</h4>
+                  <div className="space-y-3">
+                    <div className="flex justify-between py-2 border-b border-gray-100">
+                      <span>Sessions:</span>
+                      <span className="font-semibold">{analyticsData.tovani?.sessions?.toLocaleString() || 'N/A'}</span>
+                    </div>
+                    <div className="flex justify-between py-2 border-b border-gray-100">
+                      <span>Page Views:</span>
+                      <span className="font-semibold">{analyticsData.tovani?.pageviews?.toLocaleString() || 'N/A'}</span>
+                    </div>
+                    <div className="flex justify-between py-2 border-b border-gray-100">
+                      <span>Conversions:</span>
+                      <span className="font-semibold text-green-600">{analyticsData.tovani?.conversions || 'N/A'}</span>
+                    </div>
+                    <div className="flex justify-between py-2">
+                      <span>Conversion Rate:</span>
+                      <span className="font-semibold text-green-600">{analyticsData.tovani?.conversionRate || 'N/A'}</span>
                     </div>
                   </div>
                 </div>

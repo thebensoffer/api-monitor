@@ -23,9 +23,10 @@ export async function GET(request: NextRequest) {
     const results: any = {};
 
     // Property IDs
-    const properties = {
-      dk: '409955354',
-      dbs: '521897216'
+    const properties: Record<string, string> = {
+      dk: process.env.GA4_PROPERTY_ID_DK || '409955354',
+      dbs: process.env.GA4_PROPERTY_ID_DBS || '521897216',
+      tovani: process.env.GA4_PROPERTY_ID_TOVANI || '529713159',
     };
 
     // Date range calculation
@@ -97,7 +98,8 @@ export async function GET(request: NextRequest) {
     const dateRange = getDateRange(range);
 
     // Sites to fetch data for
-    const sitesToFetch = site === 'both' ? ['dk', 'dbs'] : [site];
+    const sitesToFetch =
+      site === 'both' || site === 'all' ? ['dk', 'dbs', 'tovani'] : [site];
 
     for (const siteKey of sitesToFetch) {
       if (!properties[siteKey as keyof typeof properties]) continue;
@@ -286,10 +288,7 @@ export async function GET(request: NextRequest) {
       range,
       lastUpdated: new Date().toISOString(),
       source: 'ga4_api',
-      properties: {
-        dk: properties.dk,
-        dbs: properties.dbs
-      }
+      properties
     });
 
   } catch (error) {

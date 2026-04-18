@@ -28,6 +28,7 @@ export async function GET(request: NextRequest) {
     const properties = {
       dk: process.env.GA4_PROPERTY_ID_DK || '409955354',
       dbs: process.env.GA4_PROPERTY_ID_DBS || '521897216',
+      tovani: process.env.GA4_PROPERTY_ID_TOVANI || '529713159',
     };
 
     async function realtime(propertyId: string) {
@@ -47,7 +48,11 @@ export async function GET(request: NextRequest) {
       return { total, rows };
     }
 
-    const [dkRT, dbsRT] = await Promise.all([realtime(properties.dk), realtime(properties.dbs)]);
+    const [dkRT, dbsRT, tovaniRT] = await Promise.all([
+      realtime(properties.dk),
+      realtime(properties.dbs),
+      realtime(properties.tovani),
+    ]);
 
     // Also query the last-hour and last-24h session counts so the UI has more than "right now"
     async function recent(propertyId: string) {
@@ -59,25 +64,32 @@ export async function GET(request: NextRequest) {
       const [sessions, users, newUsers] = (res.rows?.[0]?.metricValues || []).map((m) => parseInt(m.value || '0', 10));
       return { sessions: sessions ?? 0, users: users ?? 0, newUsers: newUsers ?? 0 };
     }
-    const [dkRecent, dbsRecent] = await Promise.all([recent(properties.dk), recent(properties.dbs)]);
+    const [dkRecent, dbsRecent, tovaniRecent] = await Promise.all([
+      recent(properties.dk),
+      recent(properties.dbs),
+      recent(properties.tovani),
+    ]);
 
     const flat = [
       ...dkRT.rows.map((r) => ({ ...r, site: 'DK' })),
       ...dbsRT.rows.map((r) => ({ ...r, site: 'DBS' })),
+      ...tovaniRT.rows.map((r) => ({ ...r, site: 'Tovani' })),
     ];
 
     return NextResponse.json({
       success: true,
       data: {
-        active_now: dkRT.total + dbsRT.total,
+        active_now: dkRT.total + dbsRT.total + tovaniRT.total,
         active_dk: dkRT.total,
         active_dbs: dbsRT.total,
+        active_tovani: tovaniRT.total,
         last_24h: {
           dk: dkRecent,
           dbs: dbsRecent,
-          total_sessions: dkRecent.sessions + dbsRecent.sessions,
+          tovani: tovaniRecent,
+          total_sessions: dkRecent.sessions + dbsRecent.sessions + tovaniRecent.sessions,
         },
-        live_activity: flat.slice(0, 20),
+        live_activity: flat.slice(0, 30),
       },
       timestamp: new Date().toISOString(),
     });

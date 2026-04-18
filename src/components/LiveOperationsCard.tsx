@@ -6,7 +6,8 @@ interface VisitorsData {
   active_now: number;
   active_dk: number;
   active_dbs: number;
-  last_24h: { dk: any; dbs: any; total_sessions: number };
+  active_tovani: number;
+  last_24h: { dk: any; dbs: any; tovani: any; total_sessions: number };
   live_activity: any[];
 }
 
@@ -97,13 +98,13 @@ export function LiveOperationsCard() {
             <MetricBlock
               label="Active right now"
               value={visitors.data.active_now}
-              sub={`DK ${visitors.data.active_dk} · DBS ${visitors.data.active_dbs}`}
+              sub={`DK ${visitors.data.active_dk} · DBS ${visitors.data.active_dbs} · TH ${visitors.data.active_tovani}`}
               tone="green"
             />
             <MetricBlock
               label="Sessions (24h)"
               value={visitors.data.last_24h.total_sessions}
-              sub={`DK ${visitors.data.last_24h.dk?.sessions ?? 0} · DBS ${visitors.data.last_24h.dbs?.sessions ?? 0}`}
+              sub={`DK ${visitors.data.last_24h.dk?.sessions ?? 0} · DBS ${visitors.data.last_24h.dbs?.sessions ?? 0} · TH ${visitors.data.last_24h.tovani?.sessions ?? 0}`}
               tone="blue"
             />
           </>

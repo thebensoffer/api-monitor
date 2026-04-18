@@ -33,14 +33,16 @@ export async function GET(request: NextRequest) {
     const results: any = {};
 
     // Site URLs - try both URL property and domain property formats
-    const siteUrls = {
+    const siteUrls: Record<string, string> = {
       dk: 'https://discreetketamine.com/',
-      dbs: 'https://drbensoffer.com/'
+      dbs: 'https://drbensoffer.com/',
+      tovani: 'https://tovanihealth.com/',
     };
-    
-    const domainUrls = {
+
+    const domainUrls: Record<string, string> = {
       dk: 'sc-domain:discreetketamine.com',
-      dbs: 'sc-domain:drbensoffer.com'
+      dbs: 'sc-domain:drbensoffer.com',
+      tovani: 'sc-domain:tovanihealth.com',
     };
 
     // Date range calculation
@@ -68,7 +70,8 @@ export async function GET(request: NextRequest) {
     };
 
     const dateRange = getDateRange(range);
-    const sitesToFetch = site === 'both' ? ['dk', 'dbs'] : [site];
+    const sitesToFetch =
+      site === 'both' || site === 'all' ? ['dk', 'dbs', 'tovani'] : [site];
 
     for (const siteKey of sitesToFetch) {
       if (!siteUrls[siteKey as keyof typeof siteUrls]) continue;
