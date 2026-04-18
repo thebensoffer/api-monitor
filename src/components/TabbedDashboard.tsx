@@ -2,6 +2,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { useSearchParams, useRouter } from 'next/navigation';
 import { TimePeriodSelector } from './TimePeriodSelector';
 import { AnalyticsCharts } from './AnalyticsCharts';
 import { ServicesListModal, PerformanceModal } from './DetailModals';
@@ -36,9 +37,25 @@ interface StatusData {
 }
 
 export function TabbedDashboard() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const [statusData, setStatusData] = useState<StatusData | null>(null);
   const [loading, setLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState('overview');
+  const [activeTab, _setActiveTab] = useState(searchParams?.get('tab') || 'overview');
+
+  // Wrap setActiveTab so URL stays in sync (back button + shareable links work)
+  const setActiveTab = (tab: string) => {
+    _setActiveTab(tab);
+    const url = new URL(window.location.href);
+    url.searchParams.set('tab', tab);
+    router.replace(`${url.pathname}?${url.searchParams.toString()}`, { scroll: false });
+  };
+
+  // Sync if URL changes externally (e.g., browser nav)
+  useEffect(() => {
+    const t = searchParams?.get('tab');
+    if (t && t !== activeTab) _setActiveTab(t);
+  }, [searchParams]);
   const [analyticsData, setAnalyticsData] = useState<any>(null);
   const [gscData, setGscData] = useState<any>(null);
   const [selectedPeriod, setSelectedPeriod] = useState('7d');
