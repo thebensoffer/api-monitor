@@ -12,8 +12,8 @@ interface LinkDef {
 const LINKS: LinkDef[] = [
   {
     label: 'Discreet Ketamine',
-    href: 'https://discreetketamine.com',
-    tagline: 'Patient platform',
+    href: 'https://discreetketamine.com/admin',
+    tagline: 'Admin dashboard',
     accent: 'border-emerald-500',
     logo: (
       <div className="text-emerald-700 font-extrabold text-2xl tracking-tight leading-none">
@@ -23,8 +23,8 @@ const LINKS: LinkDef[] = [
   },
   {
     label: 'Tovani Health',
-    href: 'https://tovanihealth.com',
-    tagline: 'B2B clinical',
+    href: 'https://tovanihealth.com/admin',
+    tagline: 'Admin dashboard',
     accent: 'border-indigo-500',
     logo: (
       <div className="text-indigo-700 font-extrabold text-2xl tracking-tight leading-none">
@@ -34,8 +34,8 @@ const LINKS: LinkDef[] = [
   },
   {
     label: 'Dr Ben Soffer',
-    href: 'https://drbensoffer.com',
-    tagline: 'Concierge',
+    href: 'https://drbensoffer.com/admin',
+    tagline: 'Admin dashboard',
     accent: 'border-amber-500',
     logo: (
       <div className="text-amber-700 font-extrabold text-2xl tracking-tight leading-none">
