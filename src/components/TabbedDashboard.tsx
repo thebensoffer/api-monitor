@@ -11,6 +11,7 @@ import { UserFlowsPanel } from './UserFlowsPanel';
 import { ServiceDrillRow } from './ServiceDrillRow';
 import { CronsPanel } from './CronsPanel';
 import { QuickLinks } from './QuickLinks';
+import { LiveOperationsCard } from './LiveOperationsCard';
 
 interface ServiceStatus {
   key: string;
@@ -519,94 +520,44 @@ export function TabbedDashboard() {
             </div>
           </div>
 
-          {/* Patient Queue & Business Metrics */}
-          <div className="bg-white shadow rounded-lg p-6">
-            <h4 className="text-lg font-semibold mb-4 flex items-center">
-              🏥 Patient Flow & Business Intelligence
-              <span className="ml-2 inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-purple-100 text-purple-800">
-                Real Data
-              </span>
-            </h4>
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-              <div className="text-center p-4 bg-gradient-to-br from-blue-50 to-blue-100 rounded-lg">
-                <div className="text-2xl font-bold text-blue-600 mb-1">23</div>
-                <div className="text-sm text-blue-700">Active Patients (DK)</div>
-                <div className="text-xs text-blue-600 mt-1">↗ +2 this week</div>
-              </div>
-              <div className="text-center p-4 bg-gradient-to-br from-emerald-50 to-emerald-100 rounded-lg">
-                <div className="text-2xl font-bold text-emerald-600 mb-1">8</div>
-                <div className="text-sm text-emerald-700">DBS Members</div>
-                <div className="text-xs text-emerald-600 mt-1">🔄 1 renewal due</div>
-              </div>
-              <div className="text-center p-4 bg-gradient-to-br from-purple-50 to-purple-100 rounded-lg">
-                <div className="text-2xl font-bold text-purple-600 mb-1">$2,847</div>
-                <div className="text-sm text-purple-700">This Week Revenue</div>
-                <div className="text-xs text-purple-600 mt-1">📈 +18% vs last week</div>
-              </div>
-            </div>
-            
-            {/* Real Business Alerts - Only show if we have actual alerts */}
-            {alerts && alerts.length > 0 && (
-              <div className="mt-6 pt-6 border-t border-gray-200">
-                <h5 className="text-sm font-medium text-gray-900 mb-3">📊 Recent Business Activity</h5>
-                <div className="flow-root">
-                  <ul className="-mb-8 space-y-3">
-                    {alerts.slice(0, 3).map((alert: any, index: number) => (
-                      <li key={index} className="relative">
-                        <div className="flex items-center space-x-3">
-                          <div className={`w-2 h-2 rounded-full ${
-                            alert.severity === 'critical' ? 'bg-red-500' :
-                            alert.severity === 'warning' ? 'bg-yellow-500' : 'bg-green-500'
-                          }`}></div>
-                          <div className="min-w-0 flex-1">
-                            <div className="text-sm text-gray-900">{alert.message}</div>
-                            <div className="text-xs text-gray-500">{alert.timestamp}</div>
-                          </div>
-                        </div>
-                      </li>
-                    ))}
-                  </ul>
-                </div>
-              </div>
-            )}
-          </div>
+          {/* Live Operations — real GA4 + Amplify data, replaces former mock cards */}
+          <LiveOperationsCard />
 
-          {/* Sentry & Error Monitoring Integration */}
-          <div className="bg-white shadow rounded-lg p-6">
-            <div className="flex items-center justify-between mb-4">
-              <h4 className="text-lg font-semibold flex items-center">
-                🐛 Live Error Monitoring (Sentry)
-                <span className="ml-2 inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800">
-                  Auto-Fix Active
-                </span>
-              </h4>
-              <div className="text-sm text-gray-500">
-                3 projects • Real-time feed
-              </div>
+          {/* Live alerts — driven by real probes */}
+          {alerts && alerts.length > 0 && (
+            <div className="bg-white shadow rounded-lg p-6">
+              <h4 className="text-lg font-semibold mb-3">🔔 Active Alerts</h4>
+              <ul className="space-y-2">
+                {alerts.map((alert: any) => (
+                  <li
+                    key={alert.id}
+                    className={`flex items-start gap-3 p-3 rounded-lg border-l-4 ${
+                      alert.type === 'error'
+                        ? 'border-red-500 bg-red-50'
+                        : alert.type === 'warning'
+                        ? 'border-yellow-500 bg-yellow-50'
+                        : alert.type === 'success'
+                        ? 'border-green-500 bg-green-50'
+                        : 'border-blue-500 bg-blue-50'
+                    }`}
+                  >
+                    <div className="text-lg">
+                      {alert.type === 'error' ? '🚨' : alert.type === 'warning' ? '⚠️' : alert.type === 'success' ? '✅' : 'ℹ️'}
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="text-sm font-medium text-gray-900">{alert.title}</div>
+                      <div className="text-xs text-gray-700 mt-0.5">{alert.message}</div>
+                      <div className="text-[11px] text-gray-500 mt-1 flex gap-3">
+                        <span>{alert.source}</span>
+                        <span>{new Date(alert.timestamp).toLocaleTimeString()}</span>
+                        {alert.action && <span>→ {alert.action}</span>}
+                      </div>
+                    </div>
+                  </li>
+                ))}
+              </ul>
             </div>
-            
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-4">
-              <div className="text-center p-3 bg-red-50 rounded-lg">
-                <div className="text-2xl font-bold text-red-600">2</div>
-                <div className="text-xs text-red-700">Active Errors</div>
-                <div className="text-xs text-red-600">⏳ Auto-fixing...</div>
-              </div>
-              <div className="text-center p-3 bg-green-50 rounded-lg">
-                <div className="text-2xl font-bold text-green-600">95.8%</div>
-                <div className="text-xs text-green-700">Error-Free Sessions</div>
-                <div className="text-xs text-green-600">↗ +0.3% this week</div>
-              </div>
-              <div className="text-center p-3 bg-blue-50 rounded-lg">
-                <div className="text-2xl font-bold text-blue-600">12m</div>
-                <div className="text-xs text-blue-700">Avg Fix Time</div>
-                <div className="text-xs text-blue-600">Fully automated</div>
-              </div>
-            </div>
-            
-            <div className="text-xs text-gray-600 bg-gray-50 p-3 rounded-lg">
-              <strong>Latest Auto-Fixes:</strong> Payment validation error (DK) ✅ 12min ago • Database timeout (Both) ✅ Optimized • Form validation (DBS) ⏳ In progress
-            </div>
-          </div>
+          )}
         </div>
       )}
 

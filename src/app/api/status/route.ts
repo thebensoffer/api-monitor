@@ -22,6 +22,9 @@ export async function GET(_request: NextRequest) {
     sentryProbe,
     ga4Probe,
     gscProbe,
+    stripeStatus,
+    twilioStatus,
+    resendStatus,
   ] = await Promise.all([
     probe({ endpoint: 'dk-health', url: 'https://discreetketamine.com/api/health' }),
     probe({ endpoint: 'dbs-health', url: 'https://drbensoffer.com/api/health' }),
@@ -67,19 +70,40 @@ export async function GET(_request: NextRequest) {
       url: 'http://localhost:3000/api/gsc-data?range=7d&site=both',
       headers: { 'x-monitor-key': process.env.MONITOR_API_KEY || '' },
     }),
+    probe({ endpoint: 'stripe-status', url: 'https://status.stripe.com/api/v2/status.json' }),
+    probe({ endpoint: 'twilio-status', url: 'https://status.twilio.com/api/v2/status.json' }),
+    probe({ endpoint: 'resend-status', url: 'https://resend-status.com/api/v2/status.json' }),
   ]);
+
+  // Map status.io-style "indicator" -> our status enum
+  function indicatorToStatus(p: any, name: string) {
+    const ind = p.response?.parsedBody?.status?.indicator;
+    const desc = p.response?.parsedBody?.status?.description;
+    if (p.error || !p.response?.ok) {
+      return probeToService(name.toLowerCase().replace(/ /g, '-'), name, p, { provider: 'status-page' });
+    }
+    const status: 'online' | 'warning' | 'error' =
+      ind === 'none' ? 'online' : ind === 'minor' ? 'warning' : 'error';
+    return {
+      key: name.toLowerCase().replace(/ /g, '-'),
+      name,
+      status,
+      responseTime: p.response.durationMs,
+      lastCheck: p.response.receivedAt,
+      metadata: {
+        url: p.url,
+        httpStatus: p.response.httpStatus,
+        contentLength: p.response.contentLength,
+        provider: 'status-page',
+        indicator: ind,
+        statusDescription: desc,
+      },
+      transmission: p,
+    };
+  }
 
   services.push(probeToService('dk', 'Discreet Ketamine', dkProbe));
   services.push(probeToService('dbs', 'Dr Ben Soffer', dbsProbe));
-
-  services.push({
-    key: 'amplify',
-    name: 'AWS Amplify',
-    status: 'online',
-    responseTime: 120,
-    lastCheck: new Date().toISOString(),
-    metadata: { lastBuildId: '733', buildStatus: 'RUNNING' },
-  });
 
   services.push(
     probeToService('tovani', 'Tovani Health', tovaniHealth, {
@@ -150,13 +174,10 @@ export async function GET(_request: NextRequest) {
     })
   );
 
-  // Static services we can't easily ping — keep simple metadata for these
-  const staticServices = [
-    { key: 'stripe', name: 'Stripe Payments', status: 'online', responseTime: 51, metadata: { environment: 'production', accounts: 'FL, NJ' } },
-    { key: 'twilio', name: 'Twilio SMS', status: 'online', responseTime: 99, metadata: { a2p: 'active', numbers: 3 } },
-    { key: 'resend', name: 'Resend Email', status: 'online', responseTime: 25, metadata: { domain: 'verified' } },
-  ];
-  staticServices.forEach((service) => services.push({ ...service, lastCheck: new Date().toISOString() }));
+  // Real status-page probes for the third-party services we depend on
+  services.push(indicatorToStatus(stripeStatus, 'Stripe Payments'));
+  services.push(indicatorToStatus(twilioStatus, 'Twilio SMS'));
+  services.push(indicatorToStatus(resendStatus, 'Resend Email'));
 
   const summary = {
     total: services.length,

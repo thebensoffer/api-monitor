@@ -126,30 +126,11 @@ export async function GET(request: NextRequest) {
     results.recentIssues.sort((a, b) => new Date(b.lastSeen).getTime() - new Date(a.lastSeen).getTime());
     results.recentIssues = results.recentIssues.slice(0, 20);
 
-    // Generate error trends (mock data for now)
-    results.errorTrends = generateErrorTrends();
-    
-    // Performance issues (mock)
-    results.performanceIssues = [
-      {
-        id: 'perf-1',
-        title: 'High TTFB on /eligibility',
-        project: 'discreetketamine',
-        impact: 'high',
-        affectedUsers: 156,
-        avgDuration: '2.4s',
-        trend: 'increasing'
-      },
-      {
-        id: 'perf-2', 
-        title: 'Large DOM size on homepage',
-        project: 'drbensoffer',
-        impact: 'medium',
-        affectedUsers: 23,
-        avgDuration: '1.8s',
-        trend: 'stable'
-      }
-    ];
+    // Note: errorTrends and performanceIssues require Sentry's stats v2 API
+    // and Performance API respectively — wire those when needed. For now,
+    // omit them rather than fake them.
+    results.errorTrends = [];
+    results.performanceIssues = [];
 
     return NextResponse.json({
       success: true,
@@ -212,28 +193,8 @@ function getProjectHealth(issues: any[]): 'excellent' | 'good' | 'warning' | 'cr
   return 'excellent';
 }
 
-function getLastDeployment(project: string): any {
-  // Mock deployment data - would integrate with Amplify API
-  const deployments = {
-    discreetketamine: { build: '735', status: 'SUCCEED', time: '4 min ago' },
-    drbensoffer: { build: '734', status: 'SUCCEED', time: '8 min ago' },
-    beyondthederech: { build: '156', status: 'SUCCEED', time: '2 days ago' }
-  };
-  
-  return deployments[project as keyof typeof deployments] || null;
-}
-
-function generateErrorTrends(): any[] {
-  const hours = [];
-  for (let i = 23; i >= 0; i--) {
-    const time = new Date(Date.now() - i * 60 * 60 * 1000);
-    hours.push({
-      hour: time.getHours(),
-      timestamp: time.toISOString(),
-      errors: Math.floor(Math.random() * 20) + 1,
-      newErrors: Math.floor(Math.random() * 5),
-      resolvedErrors: Math.floor(Math.random() * 8)
-    });
-  }
-  return hours;
+function getLastDeployment(_project: string): any {
+  // Real deployment data is fetched from /api/builds (live AWS Amplify SDK).
+  // Returning null here — caller should hydrate from /api/builds.
+  return null;
 }

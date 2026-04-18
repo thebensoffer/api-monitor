@@ -11,6 +11,8 @@
     "monitor:performance": "npx tsx scripts/performance-monitor.ts"
   },
   "dependencies": {
+    "@aws-sdk/client-amplify": "^3.1032.0",
+    "@aws-sdk/client-cloudwatch-logs": "^3.1032.0",
     "@aws-sdk/client-dynamodb": "^3.1008.0",
     "@aws-sdk/lib-dynamodb": "^3.1008.0",
     "@google-analytics/data": "^5.2.1",

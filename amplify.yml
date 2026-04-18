@@ -13,7 +13,10 @@ frontend:
             for var in MONITOR_API_KEY NEXT_PUBLIC_MONITOR_API_KEY CRON_SECRET \
                        SENTRY_AUTH_TOKEN DK_API_KEY DBS_API_KEY \
                        TOVANI_BASE_URL TOVANI_HEALTH_URL TOVANI_SYSTEM_HEALTH_URL TOVANI_COMMS_URL \
-                       TOVANI_KHAI_API_KEY GOOGLE_API_KEY; do
+                       TOVANI_KHAI_API_KEY GOOGLE_API_KEY \
+                       GOOGLE_APPLICATION_CREDENTIALS_JSON \
+                       GA4_PROPERTY_ID_DK GA4_PROPERTY_ID_DBS \
+                       OPENHEART_AWS_ACCESS_KEY_ID OPENHEART_AWS_SECRET_ACCESS_KEY OPENHEART_AWS_REGION; do
               if [ -n "${!var}" ]; then echo "${var}=${!var}"; fi
             done
           } > .env.production

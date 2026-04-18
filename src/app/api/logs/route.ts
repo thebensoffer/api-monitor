@@ -1,4 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
+import {
+  CloudWatchLogsClient,
+  DescribeLogGroupsCommand,
+  FilterLogEventsCommand,
+} from '@aws-sdk/client-cloudwatch-logs';
+
+export const dynamic = 'force-dynamic';
 
 interface LogEntry {
   timestamp: string;
@@ -8,109 +15,115 @@ interface LogEntry {
   metadata?: Record<string, any>;
 }
 
-// Mock log data - in a real app this would come from a logging service
-const generateMockLogs = (): LogEntry[] => {
-  const logs: LogEntry[] = [];
-  const services = ['DK', 'DBS', 'Tovani', 'Analytics', 'Sentry', 'Stripe', 'Communications'];
-  const messages = [
-    'Health check completed successfully',
-    'New patient registration processed',
-    'Payment processed successfully',
-    'Email sent to patient',
-    'Error auto-fixed and deployed',
-    'Database query optimized',
-    'Cache refreshed',
-    'API response time improved',
-    'Session started from Miami, FL',
-    'Form submission received',
-    'Prescription sent to pharmacy',
-    'Appointment scheduled',
-    'Tovani lead captured via /api/leads/email-capture',
-    'Tovani patient onboarding step submitted',
-    'Tovani DrChrono sync completed',
-    'Tovani Stripe webhook received',
-    'Tovani eligibility check passed'
-  ];
+function classify(message: string): 'info' | 'warning' | 'error' {
+  const m = message.toLowerCase();
+  if (/error|failed|exception|fatal|stack:|traceback|\bmessage:.*error\b/.test(m)) return 'error';
+  if (/warn|deprecated|timeout|retr(y|ying)|throttle/.test(m)) return 'warning';
+  return 'info';
+}
 
-  const now = new Date();
-  
-  // Generate logs for the past 2 hours
-  for (let i = 0; i < 50; i++) {
-    const timestamp = new Date(now.getTime() - (i * 2 * 60 * 1000)).toISOString();
-    const service = services[Math.floor(Math.random() * services.length)];
-    const message = messages[Math.floor(Math.random() * messages.length)];
-    
-    let level: 'info' | 'warning' | 'error' = 'info';
-    if (Math.random() < 0.1) level = 'warning';
-    if (Math.random() < 0.05) level = 'error';
-    
-    logs.push({
-      timestamp,
-      level,
-      service,
-      message,
-      metadata: {
-        responseTime: Math.floor(Math.random() * 500) + 50,
-        ip: `192.168.1.${Math.floor(Math.random() * 255)}`,
-        userAgent: 'Dashboard Monitor'
-      }
-    });
+function deriveService(logGroupName: string): string {
+  if (logGroupName.includes('amplify')) {
+    const m = logGroupName.match(/d[a-z0-9]{12,}/);
+    return m ? `amplify/${m[0]}` : 'amplify';
   }
-  
-  return logs.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
-};
+  if (logGroupName.includes('lambda')) {
+    return logGroupName.replace(/^\/aws\/lambda\//, 'λ/');
+  }
+  return logGroupName;
+}
 
 export async function GET(request: NextRequest) {
-  // Verify API key
   const apiKey = request.headers.get('x-monitor-key');
   if (!apiKey || apiKey !== process.env.MONITOR_API_KEY) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
+  const accessKeyId = process.env.OPENHEART_AWS_ACCESS_KEY_ID || process.env.AWS_ACCESS_KEY_ID;
+  const secretAccessKey = process.env.OPENHEART_AWS_SECRET_ACCESS_KEY || process.env.AWS_SECRET_ACCESS_KEY;
+  if (!accessKeyId || !secretAccessKey) {
+    return NextResponse.json({
+      success: false,
+      error: 'AWS credentials not configured',
+      hint: 'Set OPENHEART_AWS_ACCESS_KEY_ID + OPENHEART_AWS_SECRET_ACCESS_KEY',
+    }, { status: 503 });
+  }
+
+  const { searchParams } = new URL(request.url);
+  const limit = Math.min(parseInt(searchParams.get('limit') || '50', 10), 200);
+  const levelFilter = searchParams.get('level') as 'info' | 'warning' | 'error' | null;
+  const sinceParam = searchParams.get('since');
+  const groupFilter = searchParams.get('service'); // partial match against log group name
+  const sinceMs = sinceParam ? new Date(sinceParam).getTime() : Date.now() - 60 * 60 * 1000; // last hour default
+
+  const client = new CloudWatchLogsClient({
+    region: process.env.OPENHEART_AWS_REGION || process.env.AWS_REGION || 'us-east-1',
+    credentials: { accessKeyId, secretAccessKey },
+  });
+
   try {
-    const { searchParams } = new URL(request.url);
-    const limit = Math.min(parseInt(searchParams.get('limit') || '25'), 100);
-    const level = searchParams.get('level') as 'info' | 'warning' | 'error' | null;
-    const service = searchParams.get('service');
-    const since = searchParams.get('since');
+    // Pull a focused set of relevant log groups (Amplify SSR + the openheart cron Lambda)
+    const groupsResp = await client.send(new DescribeLogGroupsCommand({ limit: 50 }));
+    const allGroups = groupsResp.logGroups ?? [];
+    const focused = allGroups.filter((g) => {
+      const n = g.logGroupName || '';
+      return (
+        n.includes('amplify') ||
+        n.includes('openheart') ||
+        n.includes('discreet') ||
+        n.includes('tovani') ||
+        n.includes('drbensoffer')
+      );
+    });
 
-    let logs = generateMockLogs();
+    const target = groupFilter
+      ? focused.filter((g) => g.logGroupName?.toLowerCase().includes(groupFilter.toLowerCase()))
+      : focused.slice(0, 10);
 
-    // Apply filters
-    if (level) {
-      logs = logs.filter(log => log.level === level);
-    }
+    const eventArrays = await Promise.all(
+      target.map(async (g) => {
+        try {
+          const ev = await client.send(
+            new FilterLogEventsCommand({
+              logGroupName: g.logGroupName!,
+              startTime: sinceMs,
+              limit: 30,
+            })
+          );
+          return (ev.events ?? []).map((e): LogEntry => {
+            const msg = (e.message || '').trim();
+            return {
+              timestamp: e.timestamp ? new Date(e.timestamp).toISOString() : new Date().toISOString(),
+              level: classify(msg),
+              service: deriveService(g.logGroupName!),
+              message: msg.slice(0, 500),
+              metadata: { logGroup: g.logGroupName, logStream: e.logStreamName, eventId: e.eventId },
+            };
+          });
+        } catch {
+          return [];
+        }
+      })
+    );
 
-    if (service) {
-      logs = logs.filter(log => log.service.toLowerCase().includes(service.toLowerCase()));
-    }
-
-    if (since) {
-      const sinceDate = new Date(since);
-      logs = logs.filter(log => new Date(log.timestamp) > sinceDate);
-    }
-
-    // Apply limit
+    let logs: LogEntry[] = eventArrays.flat();
+    if (levelFilter) logs = logs.filter((l) => l.level === levelFilter);
+    logs.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
     logs = logs.slice(0, limit);
 
     return NextResponse.json({
       success: true,
+      source: 'cloudwatch',
       logs,
       total: logs.length,
-      filters: {
-        limit,
-        level,
-        service,
-        since
-      },
-      timestamp: new Date().toISOString()
+      groupsScanned: target.length,
+      filters: { limit, level: levelFilter, service: groupFilter, since: new Date(sinceMs).toISOString() },
+      timestamp: new Date().toISOString(),
     });
-
   } catch (error) {
-    return NextResponse.json({
-      success: false,
-      error: 'Failed to fetch logs',
-      details: error instanceof Error ? error.message : 'Unknown error'
-    }, { status: 500 });
+    return NextResponse.json(
+      { success: false, error: error instanceof Error ? error.message : 'Failed' },
+      { status: 500 }
+    );
   }
 }
