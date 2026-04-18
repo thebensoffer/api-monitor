@@ -12,6 +12,7 @@ import { CronsPanel } from './CronsPanel';
 import { QuickLinks } from './QuickLinks';
 import { LiveOperationsCard } from './LiveOperationsCard';
 import { GscSiteCard } from './GscSiteCard';
+import { SentCommsPanel } from './SentCommsPanel';
 
 interface ServiceStatus {
   key: string;
@@ -256,6 +257,7 @@ export function TabbedDashboard() {
 
   const tabs = [
     { id: 'overview', name: 'System Overview', icon: '📊' },
+    { id: 'sent', name: 'Sent Comms', icon: '📤' },
     { id: 'analytics', name: 'Analytics & Traffic', icon: '📈' },
     { id: 'performance', name: 'Performance', icon: '⚡' },
     { id: 'flows', name: 'User Flows', icon: '🧭' },
@@ -562,6 +564,10 @@ export function TabbedDashboard() {
 
       {activeTab === 'crons' && (
         <CronsPanel />
+      )}
+
+      {activeTab === 'sent' && (
+        <SentCommsPanel />
       )}
 
       {activeTab === 'flows' && (
