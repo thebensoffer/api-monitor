@@ -2,7 +2,7 @@
 
 import { DashboardNav } from '@/components/DashboardNav';
 import { TabbedDashboard } from '@/components/TabbedDashboard';
-import { useState, useEffect } from 'react';
+import { useState, useEffect, Suspense } from 'react';
 
 export default function Dashboard() {
   const [currentTime, setCurrentTime] = useState('--:--:-- --');
@@ -21,7 +21,9 @@ export default function Dashboard() {
 
   return (
     <div>
-      <DashboardNav />
+      <Suspense fallback={<div className="bg-white shadow-sm border-b h-16" />}>
+        <DashboardNav />
+      </Suspense>
       <div className="max-w-7xl mx-auto py-6 sm:px-6 lg:px-8">
         <div className="px-4 py-6 sm:px-0">
           <div className="mb-8">
@@ -45,7 +47,9 @@ export default function Dashboard() {
             </div>
           </div>
 
-          <TabbedDashboard />
+          <Suspense fallback={<div className="text-gray-500">Loading dashboard…</div>}>
+            <TabbedDashboard />
+          </Suspense>
         </div>
       </div>
     </div>
