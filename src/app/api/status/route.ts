@@ -72,7 +72,8 @@ export async function GET(_request: NextRequest) {
     }),
     probe({ endpoint: 'stripe-status', url: 'https://www.stripestatus.com/api/v2/status.json' }),
     probe({ endpoint: 'twilio-status', url: 'https://status.twilio.com/api/v2/status.json' }),
-    probe({ endpoint: 'resend-status', url: 'https://status.resend.com/api/v2/status.json' }),
+    // Resend uses incident.io, not the statuspage.io API — probe the actual API host instead
+    probe({ endpoint: 'resend-api', url: 'https://api.resend.com/', method: 'HEAD' }),
   ]);
 
   // Map status.io-style "indicator" -> our status enum
@@ -177,7 +178,8 @@ export async function GET(_request: NextRequest) {
   // Real status-page probes for the third-party services we depend on
   services.push(indicatorToStatus(stripeStatus, 'Stripe Payments'));
   services.push(indicatorToStatus(twilioStatus, 'Twilio SMS'));
-  services.push(indicatorToStatus(resendStatus, 'Resend Email'));
+  // Resend: no statuspage.io API; use a direct API HEAD probe
+  services.push(probeToService('resend', 'Resend Email', resendStatus, { provider: 'api-probe' }));
 
   const summary = {
     total: services.length,
