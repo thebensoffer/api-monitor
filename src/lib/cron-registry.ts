@@ -376,6 +376,9 @@ export const CRON_REGISTRY: CronDef[] = [
       const now = Date.now();
       const stale: { id: string; ageMin: number; expectedMaxMin: number }[] = [];
       for (const c of j.crons || []) {
+        // Skip self — the cron-watchdog's own lastRun isn't written until AFTER
+        // this handler returns, so it would always self-flag on its first run.
+        if (c.id === 'cron-watchdog') continue;
         // Parse expected interval from schedule (rate(N minutes/hours) only)
         let maxMin: number | null = null;
         const rateMatch = (c.schedule as string).match(/rate\((\d+)\s+(minutes?|hours?)\)/);
