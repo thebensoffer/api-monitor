@@ -20,6 +20,7 @@ import { PaymentsPanel } from './PaymentsPanel';
 import { AuditPanel } from './AuditPanel';
 import { PatientTimelinePanel } from './PatientTimelinePanel';
 import { SyntheticPanel } from './SyntheticPanel';
+import { SentryPanel } from './SentryPanel';
 
 interface ServiceStatus {
   key: string;
@@ -1215,116 +1216,8 @@ export function TabbedDashboard() {
       {activeTab === 'logs' && <LogsPanel />}
 
 
-      {/* Enhanced Error Monitoring Tab */}
-      {activeTab === 'errors' && (
-        <div className="space-y-6">
-          {/* Sentry Real-Time Error Monitoring */}
-          <div className="bg-white shadow rounded-lg p-6">
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-lg font-semibold flex items-center">
-                🐛 Sentry Error Monitoring
-                <span className="ml-2 inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-red-100 text-red-800">
-                  Live Feed
-                </span>
-              </h3>
-              <div className="flex items-center space-x-2 text-sm text-gray-500">
-                <div className="w-2 h-2 bg-red-500 rounded-full animate-pulse"></div>
-                <span>Real-time from 3 projects</span>
-              </div>
-            </div>
-            
-            {/* Error Summary Cards */}
-            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
-              <div className="bg-gradient-to-br from-red-50 to-red-100 p-4 rounded-lg">
-                <div className="text-2xl font-bold text-red-600">2</div>
-                <div className="text-sm text-red-700">New Errors (24h)</div>
-                <div className="text-xs text-red-600 mt-1">DK: Payment validation</div>
-              </div>
-              <div className="bg-gradient-to-br from-yellow-50 to-yellow-100 p-4 rounded-lg">
-                <div className="text-2xl font-bold text-yellow-600">7</div>
-                <div className="text-sm text-yellow-700">Active Issues</div>
-                <div className="text-xs text-yellow-600 mt-1">DBS: Form validation</div>
-              </div>
-              <div className="bg-gradient-to-br from-gray-50 to-gray-100 p-4 rounded-lg">
-                <div className="text-2xl font-bold text-gray-600">95.8%</div>
-                <div className="text-sm text-gray-700">Error-Free Sessions</div>
-                <div className="text-xs text-gray-600 mt-1">↗ +0.3% this week</div>
-              </div>
-            </div>
+      {activeTab === 'errors' && <SentryPanel />}
 
-            {/* Recent Errors */}
-            <div className="space-y-3">
-              <h4 className="font-medium text-gray-900 mb-3">Recent Errors (Auto-Fix Enabled)</h4>
-              
-              <div className="border-l-4 border-red-500 bg-red-50 p-4 rounded-r-lg">
-                <div className="flex items-start justify-between">
-                  <div className="flex-1">
-                    <div className="flex items-center space-x-2 mb-1">
-                      <span className="text-sm font-medium text-red-800">TypeError: Cannot read property 'id' of undefined</span>
-                      <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-red-200 text-red-800">
-                        CRITICAL
-                      </span>
-                    </div>
-                    <div className="text-sm text-red-700">
-                      <span className="font-medium">DK:</span> src/app/admin/patients/[id]/route.ts:42
-                    </div>
-                    <div class="text-xs text-red-600 mt-1">
-                      12 users affected • Last seen: 5 min ago • Auto-fix: ⏳ Analyzing...
-                    </div>
-                  </div>
-                  <button class="text-xs bg-red-600 text-white px-3 py-1 rounded hover:bg-red-700">
-                    View Details
-                  </button>
-                </div>
-              </div>
-
-              <div className="border-l-4 border-yellow-500 bg-yellow-50 p-4 rounded-r-lg">
-                <div className="flex items-start justify-between">
-                  <div className="flex-1">
-                    <div className="flex items-center space-x-2 mb-1">
-                      <span className="text-sm font-medium text-yellow-800">ReferenceError: stripe is not defined</span>
-                      <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-yellow-200 text-yellow-800">
-                        HIGH
-                      </span>
-                    </div>
-                    <div className="text-sm text-yellow-700">
-                      <span className="font-medium">DBS:</span> src/lib/stripe.ts:156
-                    </div>
-                    <div class="text-xs text-yellow-600 mt-1">
-                      3 users affected • Last seen: 18 min ago • Auto-fix: ✅ <strong>FIXED & DEPLOYED</strong>
-                    </div>
-                  </div>
-                  <button class="text-xs bg-yellow-600 text-white px-3 py-1 rounded hover:bg-yellow-700">
-                    View Fix
-                  </button>
-                </div>
-              </div>
-
-              <div className="border-l-4 border-green-500 bg-green-50 p-4 rounded-r-lg">
-                <div className="flex items-start justify-between">
-                  <div className="flex-1">
-                    <div className="flex items-center space-x-2 mb-1">
-                      <span className="text-sm font-medium text-green-800">Database connection timeout</span>
-                      <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-green-200 text-green-800">
-                        RESOLVED
-                      </span>
-                    </div>
-                    <div className="text-sm text-green-700">
-                      <span className="font-medium">Both:</span> Database query optimization
-                    </div>
-                    <div class="text-xs text-green-600 mt-1">
-                      0 users affected • Auto-fix: ✅ <strong>Connection pool optimized</strong>
-                    </div>
-                  </div>
-                  <button class="text-xs bg-green-600 text-white px-3 py-1 rounded hover:bg-green-700">
-                    View Solution
-                  </button>
-                </div>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
 
       {activeTab === 'builds' && <BuildsPanel />}
 

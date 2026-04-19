@@ -232,12 +232,106 @@ export const CRON_REGISTRY: CronDef[] = [
     id: 'backup-verification',
     group: 'monitoring',
     schedule: 'cron(30 10 * * ? *)',
-    description: 'Verifies the most recent RDS snapshot exists and is restorable.',
+    description: 'Verifies the most recent RDS / Aurora snapshot exists, is "available", and is < 26h old. Alerts on stale or failed.',
     handler: async () => {
-      return {
-        ok: true,
-        message: 'Backup-verify stub — wire AWS RDS describe-db-snapshots to enable',
-      };
+      const accessKeyId = process.env.OPENHEART_AWS_ACCESS_KEY_ID || process.env.AWS_ACCESS_KEY_ID;
+      const secretAccessKey = process.env.OPENHEART_AWS_SECRET_ACCESS_KEY || process.env.AWS_SECRET_ACCESS_KEY;
+      if (!accessKeyId || !secretAccessKey) {
+        return { ok: false, message: 'AWS creds missing' };
+      }
+      try {
+        const { RDSClient, DescribeDBSnapshotsCommand, DescribeDBClusterSnapshotsCommand, DescribeDBInstancesCommand, DescribeDBClustersCommand } = await import('@aws-sdk/client-rds');
+        const rds = new RDSClient({
+          region: process.env.OPENHEART_AWS_REGION || 'us-east-1',
+          credentials: { accessKeyId, secretAccessKey },
+        });
+        const STALE_HOURS = 26; // RDS automated backups fire daily; 26h leaves a 2h grace window
+        const now = Date.now();
+        const stale: { instance: string; ageHours: number | null; status: string }[] = [];
+
+        // 1) Standalone instances
+        const instances = await rds.send(new DescribeDBInstancesCommand({})).catch(() => ({ DBInstances: [] }));
+        const instanceResults: any[] = [];
+        for (const inst of instances.DBInstances || []) {
+          if (!inst.DBInstanceIdentifier || inst.DBClusterIdentifier) continue; // skip cluster members
+          const snaps = await rds.send(new DescribeDBSnapshotsCommand({
+            DBInstanceIdentifier: inst.DBInstanceIdentifier,
+            SnapshotType: 'automated',
+            MaxRecords: 20,
+          })).catch(() => ({ DBSnapshots: [] }));
+          const recent = (snaps.DBSnapshots || []).sort((a, b) =>
+            (b.SnapshotCreateTime?.getTime() || 0) - (a.SnapshotCreateTime?.getTime() || 0)
+          )[0];
+          const ageHours = recent?.SnapshotCreateTime
+            ? Math.floor((now - recent.SnapshotCreateTime.getTime()) / 3600000)
+            : null;
+          const status = recent?.Status || 'no-snapshot';
+          instanceResults.push({
+            instance: inst.DBInstanceIdentifier,
+            engine: inst.Engine,
+            latestSnapshot: recent?.DBSnapshotIdentifier,
+            sizeGb: recent?.AllocatedStorage,
+            ageHours,
+            status,
+          });
+          if (status !== 'available' || ageHours === null || ageHours > STALE_HOURS) {
+            stale.push({ instance: inst.DBInstanceIdentifier, ageHours, status });
+          }
+        }
+
+        // 2) Aurora clusters
+        const clusters = await rds.send(new DescribeDBClustersCommand({})).catch(() => ({ DBClusters: [] }));
+        const clusterResults: any[] = [];
+        for (const cl of clusters.DBClusters || []) {
+          if (!cl.DBClusterIdentifier) continue;
+          const snaps = await rds.send(new DescribeDBClusterSnapshotsCommand({
+            DBClusterIdentifier: cl.DBClusterIdentifier,
+            SnapshotType: 'automated',
+            MaxRecords: 20,
+          })).catch(() => ({ DBClusterSnapshots: [] }));
+          const recent = (snaps.DBClusterSnapshots || []).sort((a, b) =>
+            (b.SnapshotCreateTime?.getTime() || 0) - (a.SnapshotCreateTime?.getTime() || 0)
+          )[0];
+          const ageHours = recent?.SnapshotCreateTime
+            ? Math.floor((now - recent.SnapshotCreateTime.getTime()) / 3600000)
+            : null;
+          const status = recent?.Status || 'no-snapshot';
+          clusterResults.push({
+            cluster: cl.DBClusterIdentifier,
+            engine: cl.Engine,
+            latestSnapshot: recent?.DBClusterSnapshotIdentifier,
+            sizeGb: recent?.AllocatedStorage,
+            ageHours,
+            status,
+          });
+          if (status !== 'available' || ageHours === null || ageHours > STALE_HOURS) {
+            stale.push({ instance: cl.DBClusterIdentifier, ageHours, status });
+          }
+        }
+
+        if (stale.length > 0) {
+          await dispatchAlert({
+            id: `backup-stale-${stale.map((s) => s.instance).sort().join(',')}`,
+            type: 'error',
+            title: `${stale.length} RDS backup(s) stale or missing`,
+            message: stale.map((s) => `${s.instance}: ${s.status}, age=${s.ageHours === null ? '?' : s.ageHours + 'h'}`).join('; '),
+            severity: 'high',
+            source: 'RDS backup verification',
+            action: 'Check AWS RDS console — automated backups may be disabled or failing',
+          }).catch(() => {});
+        }
+
+        const total = instanceResults.length + clusterResults.length;
+        return {
+          ok: stale.length === 0,
+          message: stale.length === 0
+            ? `All ${total} DB(s) backed up within ${STALE_HOURS}h`
+            : `${stale.length}/${total} stale: ${stale.map((s) => s.instance).join(', ')}`,
+          data: { instances: instanceResults, clusters: clusterResults, staleCount: stale.length },
+        };
+      } catch (err) {
+        return { ok: false, message: err instanceof Error ? err.message : 'RDS check failed' };
+      }
     },
   },
   {
