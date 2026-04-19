@@ -143,7 +143,7 @@ export const CRON_REGISTRY: CronDef[] = [
     id: 'cwv-monitor',
     group: 'monitoring',
     schedule: 'cron(0 6 ? * MON *)',
-    description: 'Weekly Core Web Vitals snapshot for tovani/DK/DBS via PageSpeed Insights API.',
+    description: 'Weekly Core Web Vitals snapshot for tovani/DK/DBS via PageSpeed Insights. Alerts on perf score < 50 (poor) or LCP > 4s.',
     handler: async () => {
       const key = process.env.GOOGLE_API_KEY;
       if (!key) return { ok: false, message: 'GOOGLE_API_KEY not set; skipping PSI fetch' };
@@ -162,7 +162,253 @@ export const CRON_REGISTRY: CronDef[] = [
           fcp: lhr?.audits?.['first-contentful-paint']?.numericValue ?? null,
         };
       }));
-      return { ok: true, message: `Captured CWV for ${results.length} sites`, data: results };
+      // Alert on poor scores (Tier 3 #14)
+      const poor = results.filter((r) => (r.performance ?? 1) < 0.5 || (r.lcp ?? 0) > 4000);
+      for (const p of poor) {
+        await dispatchAlert({
+          id: `perf-poor-${p.site}-${new Date().toISOString().slice(0, 10)}`,
+          type: 'warning',
+          title: `${p.site.toUpperCase()} mobile performance degraded`,
+          message: `score=${Math.round((p.performance || 0) * 100)} · LCP=${Math.round(p.lcp || 0)}ms · CLS=${(p.cls || 0).toFixed(2)}`,
+          severity: 'medium',
+          source: 'CWV monitor',
+          action: 'Check Performance tab + PageSpeed Insights for the failing page',
+        }).catch(() => {});
+      }
+      return { ok: poor.length === 0, message: `${results.length} sites checked${poor.length ? `, ${poor.length} poor` : ', all OK'}`, data: results };
+    },
+  },
+  {
+    id: 'sender-reputation',
+    group: 'monitoring',
+    schedule: 'cron(0 14 * * ? *)',
+    description: 'Daily check of SES sending quota + bounce/complaint rate, plus Twilio A2P brand/campaign status. Alerts on degraded reputation.',
+    handler: async () => {
+      const accessKeyId = process.env.OPENHEART_AWS_ACCESS_KEY_ID || process.env.AWS_ACCESS_KEY_ID;
+      const secretAccessKey = process.env.OPENHEART_AWS_SECRET_ACCESS_KEY || process.env.AWS_SECRET_ACCESS_KEY;
+      const result: any = { ses: null, twilio: null };
+
+      // --- SES bounce/complaint reputation ---
+      if (accessKeyId && secretAccessKey) {
+        try {
+          const { SESClient, GetSendStatisticsCommand, GetSendQuotaCommand } = await import('@aws-sdk/client-ses');
+          const ses = new SESClient({
+            region: process.env.OPENHEART_AWS_REGION || 'us-east-1',
+            credentials: { accessKeyId, secretAccessKey },
+          });
+          const [stats, quota] = await Promise.all([
+            ses.send(new GetSendStatisticsCommand({})).catch((e) => ({ SendDataPoints: [], _err: e?.message })),
+            ses.send(new GetSendQuotaCommand({})).catch((e) => ({ Max24HourSend: null, SentLast24Hours: null, _err: e?.message })),
+          ]);
+          const points = (stats as any).SendDataPoints || [];
+          // Last-24h aggregate
+          const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+          const recent = points.filter((p: any) => p.Timestamp && p.Timestamp.getTime() > cutoff);
+          const totals = recent.reduce(
+            (acc: any, p: any) => ({
+              attempts: acc.attempts + (p.DeliveryAttempts || 0),
+              bounces: acc.bounces + (p.Bounces || 0),
+              complaints: acc.complaints + (p.Complaints || 0),
+              rejects: acc.rejects + (p.Rejects || 0),
+            }),
+            { attempts: 0, bounces: 0, complaints: 0, rejects: 0 }
+          );
+          const bounceRate = totals.attempts > 0 ? totals.bounces / totals.attempts : 0;
+          const complaintRate = totals.attempts > 0 ? totals.complaints / totals.attempts : 0;
+          result.ses = {
+            quota: { max24h: (quota as any).Max24HourSend, sentLast24h: (quota as any).SentLast24Hours },
+            last24h: totals,
+            bounceRate: bounceRate * 100,
+            complaintRate: complaintRate * 100,
+          };
+          // AWS account suspension thresholds: bounce >5%, complaint >0.1%
+          if (bounceRate > 0.05) {
+            await dispatchAlert({
+              id: `ses-bounce-${new Date().toISOString().slice(0, 10)}`,
+              type: 'error',
+              title: `SES bounce rate ${(bounceRate * 100).toFixed(2)}% exceeds 5%`,
+              message: `${totals.bounces}/${totals.attempts} bounced in last 24h. AWS will suspend sending if sustained.`,
+              severity: 'high',
+              source: 'Sender reputation',
+              action: 'Investigate bouncing addresses; clean list immediately',
+            }).catch(() => {});
+          } else if (complaintRate > 0.001) {
+            await dispatchAlert({
+              id: `ses-complaint-${new Date().toISOString().slice(0, 10)}`,
+              type: 'error',
+              title: `SES complaint rate ${(complaintRate * 100).toFixed(3)}% exceeds 0.1%`,
+              message: `${totals.complaints}/${totals.attempts} marked as spam. AWS suspension risk.`,
+              severity: 'high',
+              source: 'Sender reputation',
+              action: 'Audit sender list + content; add unsubscribe link if missing',
+            }).catch(() => {});
+          }
+        } catch (err) {
+          result.ses = { error: err instanceof Error ? err.message : 'SES check failed' };
+        }
+      }
+
+      // --- Twilio A2P 10DLC brand/campaign status ---
+      const sid = process.env.TWILIO_ACCOUNT_SID || process.env.NOTIFY_TWILIO_ACCOUNT_SID;
+      const token = process.env.TWILIO_AUTH_TOKEN || process.env.NOTIFY_TWILIO_AUTH_TOKEN;
+      if (sid && token) {
+        try {
+          const auth = Buffer.from(`${sid}:${token}`).toString('base64');
+          const headers = { Authorization: `Basic ${auth}` };
+          const brand = await fetch(`https://messaging.twilio.com/v1/a2p/BrandRegistrations`, { headers, signal: AbortSignal.timeout(8000) })
+            .then((r) => r.ok ? r.json() : null).catch(() => null);
+          const campaigns = await fetch(`https://messaging.twilio.com/v1/Services`, { headers, signal: AbortSignal.timeout(8000) })
+            .then((r) => r.ok ? r.json() : null).catch(() => null);
+          const brandStatuses = (brand?.results || []).map((b: any) => ({ sid: b.sid, status: b.status, brand_score: b.brand_score, failure_reason: b.failure_reason }));
+          result.twilio = {
+            brands: brandStatuses,
+            services: campaigns?.services?.length ?? 0,
+          };
+          const failedBrands = brandStatuses.filter((b: any) => b.status === 'FAILED' || b.status === 'SUSPENDED');
+          if (failedBrands.length > 0) {
+            await dispatchAlert({
+              id: `twilio-a2p-failed`,
+              type: 'error',
+              title: `Twilio A2P brand registration ${failedBrands[0].status}`,
+              message: failedBrands.map((b: any) => `${b.sid}: ${b.failure_reason || b.status}`).join('; '),
+              severity: 'high',
+              source: 'Sender reputation',
+              action: 'SMS will be throttled or blocked. Open Twilio console → A2P 10DLC',
+            }).catch(() => {});
+          }
+        } catch (err) {
+          result.twilio = { error: err instanceof Error ? err.message : 'Twilio check failed' };
+        }
+      } else {
+        result.twilio = { error: 'TWILIO_ACCOUNT_SID/AUTH_TOKEN not set' };
+      }
+
+      const sesOk = !result.ses?.error && (result.ses?.bounceRate ?? 0) < 5 && (result.ses?.complaintRate ?? 0) < 0.1;
+      const twilioOk = !result.twilio?.error && !(result.twilio?.brands || []).some((b: any) => b.status === 'FAILED' || b.status === 'SUSPENDED');
+      return {
+        ok: sesOk && twilioOk,
+        message: `SES: ${sesOk ? 'OK' : 'DEGRADED'} (bounce ${result.ses?.bounceRate?.toFixed(2) ?? '?'}%, complaint ${result.ses?.complaintRate?.toFixed(3) ?? '?'}%) · Twilio: ${twilioOk ? 'OK' : 'DEGRADED'} (${result.twilio?.brands?.length ?? 0} brands)`,
+        data: result,
+      };
+    },
+  },
+  {
+    id: 'integrity-monitor',
+    group: 'monitoring',
+    schedule: 'cron(0 9 * * ? *)',
+    description: 'Daily DB integrity check across all 3 apps. Alerts on schema-migration failures or unexpected orphan-record counts.',
+    handler: async () => {
+      const r = await fetch(`${selfBase()}/api/integrity`, { headers: selfHeaders() });
+      if (!r.ok) return { ok: false, message: `integrity API returned ${r.status}` };
+      const j = await r.json();
+      const probs: string[] = [];
+      for (const site of j.sites || []) {
+        if (site.error) {
+          probs.push(`${site.label}: API error (${site.error})`);
+          continue;
+        }
+        if (site.schema?.failedCount > 0) {
+          probs.push(`${site.label}: ${site.schema.failedCount} failed migration(s)`);
+        }
+        if (site.orphansTotal > 0) {
+          const detail = Object.entries(site.orphans || {})
+            .filter(([, n]) => (n as number) > 0)
+            .map(([k, n]) => `${k}=${n}`)
+            .join(', ');
+          probs.push(`${site.label}: ${site.orphansTotal} orphan(s) [${detail}]`);
+        }
+      }
+      if (probs.length > 0) {
+        await dispatchAlert({
+          id: `integrity-issues-${new Date().toISOString().slice(0, 10)}`,
+          type: 'warning',
+          title: `Data integrity issues across ${probs.length} site(s)`,
+          message: probs.join(' · '),
+          severity: 'medium',
+          source: 'Integrity monitor',
+          action: 'Open OpenHeart Integrity tab → drill per-site to see which records',
+        }).catch(() => {});
+      }
+      return {
+        ok: probs.length === 0,
+        message: probs.length === 0 ? 'All schemas clean, no orphans' : `${probs.length} issue(s)`,
+        data: j.summary,
+      };
+    },
+  },
+  {
+    id: 'funnel-monitor',
+    group: 'monitoring',
+    schedule: 'cron(0 12 * * ? *)',
+    description: 'Daily GA4 conversion-funnel check per site. Alerts if assessment-completion or purchase-rate drops > 30% vs 7d baseline.',
+    handler: async () => {
+      const credsJson = process.env.GOOGLE_APPLICATION_CREDENTIALS_JSON;
+      if (!credsJson) return { ok: false, message: 'GOOGLE_APPLICATION_CREDENTIALS_JSON missing' };
+      try {
+        const { BetaAnalyticsDataClient } = await import('@google-analytics/data');
+        const credentials = JSON.parse(credsJson);
+        const client = new BetaAnalyticsDataClient({ credentials });
+        const properties: Record<string, string> = {
+          dk: process.env.GA4_PROPERTY_ID_DK || '409955354',
+          dbs: process.env.GA4_PROPERTY_ID_DBS || '521897216',
+          tovani: process.env.GA4_PROPERTY_ID_TOVANI || '529713159',
+        };
+
+        const results: any[] = [];
+        for (const [site, propId] of Object.entries(properties)) {
+          try {
+            const [yesterday, baseline] = await Promise.all([
+              client.runReport({
+                property: `properties/${propId}`,
+                dateRanges: [{ startDate: 'yesterday', endDate: 'yesterday' }],
+                metrics: [{ name: 'sessions' }, { name: 'conversions' }, { name: 'purchaseRevenue' }, { name: 'totalUsers' }],
+              }),
+              client.runReport({
+                property: `properties/${propId}`,
+                dateRanges: [{ startDate: '8daysAgo', endDate: '2daysAgo' }],
+                metrics: [{ name: 'sessions' }, { name: 'conversions' }, { name: 'purchaseRevenue' }, { name: 'totalUsers' }],
+              }),
+            ]);
+            const yRow = yesterday[0].rows?.[0]?.metricValues || [];
+            const bRow = baseline[0].rows?.[0]?.metricValues || [];
+            const ySessions = parseInt(yRow[0]?.value || '0', 10);
+            const yConversions = parseInt(yRow[1]?.value || '0', 10);
+            const bSessions = parseInt(bRow[0]?.value || '0', 10);
+            const bConversions = parseInt(bRow[1]?.value || '0', 10);
+            const baselineDays = 7;
+            const yConvRate = ySessions > 0 ? yConversions / ySessions : 0;
+            const bConvRate = bSessions > 0 ? bConversions / bSessions / baselineDays : 0;
+            const dropPct = bConvRate > 0 ? ((bConvRate - yConvRate) / bConvRate) * 100 : 0;
+            const siteResult = {
+              site,
+              yesterday: { sessions: ySessions, conversions: yConversions, convRate: yConvRate * 100 },
+              baseline7d_avg: { sessions: Math.round(bSessions / baselineDays), conversions: Math.round(bConversions / baselineDays), convRate: bConvRate * 100 },
+              dropPct,
+            };
+            results.push(siteResult);
+            if (dropPct > 30 && bConversions >= 10) {
+              await dispatchAlert({
+                id: `funnel-drop-${site}-${new Date().toISOString().slice(0, 10)}`,
+                type: 'warning',
+                title: `${site.toUpperCase()} conversion rate dropped ${dropPct.toFixed(0)}%`,
+                message: `Yesterday ${(yConvRate * 100).toFixed(2)}% conv vs 7d avg ${(bConvRate * 100).toFixed(2)}%. ${ySessions} sessions, ${yConversions} conversions.`,
+                severity: 'medium',
+                source: 'Funnel monitor',
+                action: 'Check Analytics tab; investigate broken form / pricing change / outage in past 24h',
+              }).catch(() => {});
+            }
+          } catch (err) {
+            results.push({ site, error: err instanceof Error ? err.message : 'GA4 query failed' });
+          }
+        }
+        return {
+          ok: !results.some((r) => r.dropPct > 30),
+          message: results.map((r) => `${r.site}: ${r.error ? 'err' : `${r.yesterday?.conversions || 0} conv (${(r.yesterday?.convRate || 0).toFixed(2)}%)`}`).join(' · '),
+          data: results,
+        };
+      } catch (err) {
+        return { ok: false, message: err instanceof Error ? err.message : 'Funnel check failed' };
+      }
     },
   },
   {
