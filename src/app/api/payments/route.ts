@@ -51,10 +51,15 @@ export async function GET(request: NextRequest) {
   // SAME charges, just labeled by which endpoint answered. Attribution priority:
   //   1. paymentIntentId matches an Order in some site's DB → use that site
   //   2. fallback to DK (per actual ownership of the shared Stripe account)
-  const piToSite: Record<string, { site: string; label: string }> = {};
+  const piToSite: Record<string, { site: string; label: string; userName?: string | null; userEmail?: string | null }> = {};
   for (const o of allOrders) {
     if (o.stripePaymentIntentId) {
-      piToSite[o.stripePaymentIntentId] = { site: o._site, label: o._siteLabel };
+      piToSite[o.stripePaymentIntentId] = {
+        site: o._site,
+        label: o._siteLabel,
+        userName: o.userName || null,
+        userEmail: o.userEmail || null,
+      };
     }
   }
   const FALLBACK_SITE = process.env.SHARED_STRIPE_FALLBACK_SITE || 'dk';
@@ -70,7 +75,15 @@ export async function GET(request: NextRequest) {
         truthAttr ||
         dedupCharges[c.id] ||
         { site: FALLBACK_SITE, label: FALLBACK_LABEL };
-      dedupCharges[c.id] = { ...c, _site: finalAttr.site, _siteLabel: finalAttr.label };
+      dedupCharges[c.id] = {
+        ...c,
+        _site: finalAttr.site,
+        _siteLabel: finalAttr.label,
+        // Patient identity from Order match (preferred over Stripe billing_details
+        // which are often empty for our checkout flow)
+        patientName: truthAttr?.userName || c.billingName || null,
+        patientEmail: truthAttr?.userEmail || c.billingEmail || null,
+      };
     }
   }
   const allCharges = Object.values(dedupCharges);

@@ -15,6 +15,8 @@ interface Charge {
   outcomeMessage?: string | null;
   billingEmail?: string | null;
   billingName?: string | null;
+  patientName?: string | null;   // from local Order match (preferred)
+  patientEmail?: string | null;
   last4?: string | null;
   cardBrand?: string | null;
   receiptUrl?: string | null;
@@ -212,7 +214,10 @@ function ChargeRow({ charge, onRefund }: { charge: Charge; onRefund: (c: Charge)
           </span>
           <span className="font-mono text-sm font-semibold w-20">{dollars(charge.amount, charge.currency)}</span>
           <span className="text-sm text-gray-700 truncate min-w-0 flex-1">
-            {charge.billingEmail || charge.billingName || charge.id}
+            {charge.patientName || charge.patientEmail || charge.billingEmail || charge.billingName || charge.id}
+            {charge.patientName && charge.patientEmail && (
+              <span className="text-gray-400 ml-2 text-xs">{charge.patientEmail}</span>
+            )}
             {charge.cardBrand && <span className="text-gray-400 ml-2">· {charge.cardBrand} ····{charge.last4}</span>}
           </span>
           <StatusBadge status={charge.status} outcome={charge.outcome} refunded={charge.refunded} disputed={charge.disputed} />
@@ -225,6 +230,7 @@ function ChargeRow({ charge, onRefund }: { charge: Charge; onRefund: (c: Charge)
       {open && (
         <div className="px-4 py-3 bg-white text-xs space-y-2">
           <div className="grid grid-cols-2 md:grid-cols-3 gap-3">
+            <div><div className="text-gray-500 uppercase font-medium">Patient</div>{charge.patientName || '—'}{charge.patientEmail ? <div className="text-[11px] text-gray-500">{charge.patientEmail}</div> : null}</div>
             <div><div className="text-gray-500 uppercase font-medium">Charge ID</div><code className="text-[11px]">{charge.id}</code></div>
             <div><div className="text-gray-500 uppercase font-medium">Payment Intent</div><code className="text-[11px]">{charge.paymentIntentId || '—'}</code></div>
             <div><div className="text-gray-500 uppercase font-medium">Status</div>{charge.status}</div>
