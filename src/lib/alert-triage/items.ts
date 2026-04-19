@@ -50,7 +50,10 @@ export interface TriageItemInput {
   receivedAt: string;
   bodySnippet: string;
   classification: Classification;
-  actionStatus: 'shadow' | 'skipped' | 'executed' | 'failed';
+  // 'proposed' = classifier suggested an action + signed link is in actionResult.fixLink
+  // 'executed' = human clicked the link and the fix ran (updated later by /api/fix-action/execute audit write)
+  // 'none'     = no action proposed
+  actionStatus: 'proposed' | 'executed' | 'failed' | 'none';
   actionResult: Record<string, unknown> | null;
 }
 

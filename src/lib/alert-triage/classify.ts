@@ -9,7 +9,7 @@
  */
 
 import { askClaudeJSON, CLAUDE_MODELS } from '@/lib/bedrock';
-import { knownActionNames } from './actions';
+import { FIX_ACTIONS, type FixActionId } from '@/lib/fix-actions';
 
 export type Bucket = 'routine' | 'auto_fix' | 'investigate' | 'escalate';
 export type Severity = 'info' | 'low' | 'medium' | 'high' | 'critical';
@@ -46,9 +46,11 @@ Severity: info | low | medium | high | critical. Smallest severity that still co
 
 alertType is a short snake_case tag (e.g. stripe_webhook_failure, iam_key_expiring, amplify_build_failed, ssl_cert_expiring, ses_bounce_spike, sentry_error_spike, drchrono_auth_error, cloudwatch_alarm, aurora_cpu_high, backup_verification_failed, or null if nothing fits).
 
-proposedAction is the name of a known action handler, or null if none applies. Only use handler names from this allowlist: {{HANDLERS}}. If bucket is "escalate" or "routine", proposedAction MUST be null. For "investigate", proposedAction may be null.
+proposedAction is the name of a known fix-action handler (see shared allowlist in src/lib/fix-actions.ts), or null if none applies. Only use handler ids from this allowlist with their param shapes:
+{{HANDLERS}}
+If bucket is "escalate" or "routine", proposedAction MUST be null. For "investigate", proposedAction may be null.
 
-actionParams is a JSON object with fields relevant to the handler (e.g. { "eventId": "evt_abc" } for stripe_retry_webhook, { "userName": "app-user" } for rotate_iam_key, { "appId": "d2ttmub7uck5be", "branch": "main" } for restart_amplify_build). Omit or null if no action.
+actionParams is a JSON object matching the handler's paramSchema (shown inline above). Omit or null if no action.
 
 confidence is 0..1. Below 0.6, prefer "investigate" over "auto_fix".
 
@@ -69,10 +71,10 @@ function buildPrompt(msg: InboundMessage): string {
 }
 
 export async function classifyAlert(msg: InboundMessage): Promise<Classification> {
-  const system = SYSTEM_PROMPT.replace(
-    '{{HANDLERS}}',
-    knownActionNames().join(', ') || '(none)'
-  );
+  const handlerList =
+    FIX_ACTIONS.map((a) => `  - ${a.id} (${a.riskLevel} risk): ${a.description}\n      params: ${a.paramSchema}`).join('\n') ||
+    '  (no handlers registered)';
+  const system = SYSTEM_PROMPT.replace('{{HANDLERS}}', handlerList);
   const raw = await askClaudeJSON<Partial<Classification> & { severity?: string; bucket?: string }>(
     buildPrompt(msg),
     { model: CLAUDE_MODELS.HAIKU_35, system, maxTokens: 600, temperature: 0.2 }
@@ -88,8 +90,9 @@ function normalize(raw: any): Classification {
   const severity = allowedSev.includes(raw.severity) ? (raw.severity as Severity) : 'medium';
   const confidence = clamp01(typeof raw.confidence === 'number' ? raw.confidence : 0.5);
 
+  const knownIds = FIX_ACTIONS.map((a) => a.id as string);
   let proposedAction: string | null = raw.proposedAction ?? null;
-  if (proposedAction && !knownActionNames().includes(proposedAction)) proposedAction = null;
+  if (proposedAction && !knownIds.includes(proposedAction)) proposedAction = null;
   if (bucket === 'routine' || bucket === 'escalate') proposedAction = null;
 
   const finalBucket: Bucket = bucket === 'auto_fix' && confidence < 0.6 ? 'investigate' : bucket;

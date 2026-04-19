@@ -473,9 +473,13 @@ export const CRON_REGISTRY: CronDef[] = [
         '@/lib/alert-triage/inbox'
       );
       const { classifyAlert } = await import('@/lib/alert-triage/classify');
-      const { getActionHandler, isActionEnabled } = await import('@/lib/alert-triage/actions');
       const { putTriageItem } = await import('@/lib/alert-triage/items');
       const { dispatchAlert } = await import('@/lib/notify');
+      const { signFixToken } = await import('@/lib/fix-tokens');
+
+      // Base URL for magic-link tokens embedded in the digest alert.
+      const selfUrl =
+        process.env.OPENHEART_SELF_URL || 'https://main.dl7zrj8lm47be.amplifyapp.com';
 
       let scanned = 0;
       let created = 0;
@@ -486,7 +490,7 @@ export const CRON_REGISTRY: CronDef[] = [
         investigate: 0,
         escalate: 0,
       };
-      const sampleSubjects: string[] = [];
+      const sampleLines: string[] = [];
 
       const rows = await listUntriaged(50);
       scanned = rows.length;
@@ -503,22 +507,26 @@ export const CRON_REGISTRY: CronDef[] = [
             platform: row.platform || platformForDomain(row.recipientDomain),
           });
 
-          // Phase-1 shadow: invoke handler stub when present, never execute real work.
-          let actionResult: Record<string, unknown> | null = null;
-          if (classification.proposedAction) {
-            const handler = getActionHandler(classification.proposedAction);
-            if (handler) {
-              const mode = isActionEnabled(classification.proposedAction) ? 'executed' : 'shadow';
-              try {
-                const r = await handler(classification.actionParams, {
-                  platform: (row.platform as any) || 'unknown',
-                  sourceMessageId: row.id,
-                  subject: row.subject,
-                });
-                actionResult = { ...r, intendedMode: mode };
-              } catch (err: any) {
-                actionResult = { ok: false, mode, summary: `Handler threw: ${err?.message}` };
-              }
+          // If the classifier proposes a known fix-action, mint a signed
+          // magic-link token so the digest alert can carry a one-tap
+          // "apply this fix" URL. 30-min expiry enforced in fix-tokens.
+          // The link lands on /api/fix-action/execute, which shows a
+          // dry-run preview first (GET) before execute (POST).
+          let fixLink: string | null = null;
+          if (classification.proposedAction && classification.actionParams) {
+            try {
+              const token = signFixToken({
+                actionId: classification.proposedAction,
+                params: classification.actionParams,
+                alertId: `triage-${row.id}`,
+                mode: 'dryRun',
+                expiresAt: Date.now() + 30 * 60 * 1000,
+              });
+              fixLink = `${selfUrl}/api/fix-action/execute?t=${token}`;
+            } catch (err: any) {
+              // FIX_TOKEN_SECRET unset — classifier still records the item,
+              // just without a clickable link.
+              console.warn('[email-alert-triage] token signing failed:', err?.message);
             }
           }
 
@@ -530,17 +538,20 @@ export const CRON_REGISTRY: CronDef[] = [
             receivedAt: row.receivedAt,
             bodySnippet: row.textBody || row.snippet || '',
             classification,
-            actionStatus: actionResult ? 'shadow' : 'skipped',
-            actionResult,
+            actionStatus: classification.proposedAction ? 'proposed' : 'none',
+            actionResult: fixLink ? { fixLink } : null,
           });
           await markTriaged(row.id, row.receivedAt);
 
           byBucket[classification.bucket] = (byBucket[classification.bucket] || 0) + 1;
-          if (
-            classification.bucket !== 'routine' &&
-            sampleSubjects.length < 5
-          ) {
-            sampleSubjects.push(`[${classification.bucket}] ${row.subject.slice(0, 80)}`);
+
+          if (classification.bucket !== 'routine' && sampleLines.length < 6) {
+            const bucketLabel =
+              classification.bucket === 'escalate' ? '🚨' :
+              classification.bucket === 'auto_fix' ? '🛠️' :
+              '🔎';
+            const line = `${bucketLabel} [${row.platform || 'unknown'}] ${row.subject.slice(0, 80)}${fixLink ? ` — ${fixLink}` : ''}`;
+            sampleLines.push(line);
           }
           created++;
         } catch (err: any) {
@@ -549,25 +560,25 @@ export const CRON_REGISTRY: CronDef[] = [
         }
       }
 
-      // Severity routing: escalate > auto_fix > investigate > routine
+      // Severity routing: escalate > auto_fix > investigate
       const worstSeverity: 'high' | 'medium' | 'low' =
-        byBucket.escalate > 0 ? 'high' : byBucket.auto_fix > 0 ? 'medium' : byBucket.investigate > 0 ? 'low' : 'low';
+        byBucket.escalate > 0 ? 'high' :
+        byBucket.auto_fix > 0 ? 'medium' :
+        'low';
 
-      // Only emit a notification when something new landed
       if (created > 0) {
         try {
           await dispatchAlert({
-            id: `alert-triage-${new Date().toISOString().slice(0, 13)}`, // hourly dedup bucket
-            type:
-              byBucket.escalate > 0 ? 'error' : byBucket.auto_fix > 0 ? 'warning' : 'info',
+            id: `alert-triage-${new Date().toISOString().slice(0, 13)}`,
+            type: byBucket.escalate > 0 ? 'error' : byBucket.auto_fix > 0 ? 'warning' : 'info',
             severity: worstSeverity,
             title: `Alert triage: ${created} new (${byBucket.escalate}🚨 ${byBucket.auto_fix}🛠️ ${byBucket.investigate}🔎 ${byBucket.routine}✅)`,
             message:
-              sampleSubjects.length > 0
-                ? sampleSubjects.join('\n')
+              sampleLines.length > 0
+                ? sampleLines.join('\n')
                 : `${created} routine alerts classified, nothing needing attention.`,
             source: 'alert-triage cron',
-            action: 'Open dashboard → Triage tab for details',
+            action: 'Open dashboard → Triage tab; or tap a fix-link in the list above',
           });
         } catch (err: any) {
           console.error('[email-alert-triage] dispatchAlert failed', err?.message);
