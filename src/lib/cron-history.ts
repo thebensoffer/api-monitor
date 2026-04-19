@@ -106,25 +106,36 @@ export async function getRuns(id: string): Promise<CronRun[]> {
 export async function getAllLatest(): Promise<Record<string, CronRun | null>> {
   const c = client();
   if (!c) return {};
-  // Scan once and pick the newest per cronId. Cheap because the table is small
-  // and TTL keeps it bounded.
-  const res = await c.send(new ScanCommand({ TableName: TABLE }));
+  // Scan with pagination — DynamoDB returns max 1MB/page, our table grows
+  // past that quickly. Without pagination, recently-added crons get omitted.
   const latest: Record<string, CronRun> = {};
-  for (const i of res.Items ?? []) {
-    const existing = latest[i.cronId];
-    if (!existing || existing.startedAt < i.startedAt) {
-      latest[i.cronId] = {
-        id: i.cronId,
-        startedAt: i.startedAt,
-        finishedAt: i.finishedAt,
-        durationMs: i.durationMs,
-        ok: i.ok,
-        message: i.message,
-        source: i.source,
-        data: i.data,
-        error: i.error,
-      };
+  let lastKey: any = undefined;
+  let pageCount = 0;
+  do {
+    const res = await c.send(new ScanCommand({
+      TableName: TABLE,
+      ExclusiveStartKey: lastKey,
+    }));
+    for (const i of res.Items ?? []) {
+      const existing = latest[i.cronId];
+      if (!existing || existing.startedAt < i.startedAt) {
+        latest[i.cronId] = {
+          id: i.cronId,
+          startedAt: i.startedAt,
+          finishedAt: i.finishedAt,
+          durationMs: i.durationMs,
+          ok: i.ok,
+          message: i.message,
+          source: i.source,
+          data: i.data,
+          error: i.error,
+        };
+      }
     }
-  }
+    lastKey = res.LastEvaluatedKey;
+    pageCount++;
+    // Hard cap so a runaway table doesn't burn the Lambda's time
+    if (pageCount > 20) break;
+  } while (lastKey);
   return latest;
 }
