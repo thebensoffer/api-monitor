@@ -46,8 +46,43 @@ export async function GET(request: NextRequest) {
   const results = await Promise.all(SITES.map((s) => fetchSite(s, since, limit)));
 
   const allOrders = results.flatMap((r) => r.orders);
-  const allCharges = results.flatMap((r) => r.charges);
-  const allRefunds = results.flatMap((r) => r.refunds);
+
+  // DK + Tovani share the same Stripe account → both endpoints return the
+  // SAME charges, just labeled differently. Build paymentIntentId → site
+  // attribution from the Order tables (each Order knows its true owner)
+  // and dedupe by charge id.
+  const piToSite: Record<string, { site: string; label: string }> = {};
+  for (const o of allOrders) {
+    if (o.stripePaymentIntentId) {
+      piToSite[o.stripePaymentIntentId] = { site: o._site, label: o._siteLabel };
+    }
+  }
+
+  const dedupCharges: Record<string, any> = {};
+  for (const r of results) {
+    for (const c of r.charges) {
+      if (!c.id) continue;
+      // Use existing entry's attribution if we've already seen this charge id
+      const existing = dedupCharges[c.id];
+      const truthAttr = c.paymentIntentId ? piToSite[c.paymentIntentId] : null;
+      const finalAttr = truthAttr || existing || { site: c._site, label: c._siteLabel };
+      dedupCharges[c.id] = { ...c, _site: finalAttr.site, _siteLabel: finalAttr.label };
+    }
+  }
+  const allCharges = Object.values(dedupCharges);
+
+  // Same dedup for refunds (they reference paymentIntentId too)
+  const dedupRefunds: Record<string, any> = {};
+  for (const r of results) {
+    for (const refund of r.refunds) {
+      if (!refund.id) continue;
+      const existing = dedupRefunds[refund.id];
+      const truthAttr = refund.paymentIntentId ? piToSite[refund.paymentIntentId] : null;
+      const finalAttr = truthAttr || existing || { site: refund._site, label: refund._siteLabel };
+      dedupRefunds[refund.id] = { ...refund, _site: finalAttr.site, _siteLabel: finalAttr.label };
+    }
+  }
+  const allRefunds = Object.values(dedupRefunds);
 
   // Highlight failures: charges with status=failed or outcome=blocked, plus disputed
   const failures = allCharges.filter((c: any) =>
@@ -75,9 +110,10 @@ export async function GET(request: NextRequest) {
       bySite: results.map((r) => ({
         site: r.site,
         label: r.label,
-        orders: r.orders.length,
-        charges: r.charges.length,
-        refunds: r.refunds.length,
+        orders: r.orders.length, // orders are still per-site (DB-sourced)
+        charges: allCharges.filter((c: any) => c._site === r.site).length, // attributed by paymentIntentId match
+        refunds: allRefunds.filter((rf: any) => rf._site === r.site).length,
+        chargesUnattributed: allCharges.filter((c: any) => c._site === r.site && !c.paymentIntentId).length,
         error: r.error,
       })),
     },
