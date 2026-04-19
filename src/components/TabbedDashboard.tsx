@@ -16,6 +16,8 @@ import { GscSiteCard } from './GscSiteCard';
 import { SentCommsPanel } from './SentCommsPanel';
 import { BuildsPanel } from './BuildsPanel';
 import { LogsPanel } from './LogsPanel';
+import { PaymentsPanel } from './PaymentsPanel';
+import { AuditPanel } from './AuditPanel';
 
 interface ServiceStatus {
   key: string;
@@ -277,6 +279,8 @@ export function TabbedDashboard() {
   const tabs = [
     { id: 'overview', name: 'System Overview', icon: '📊' },
     { id: 'sent', name: 'Sent Comms', icon: '📤' },
+    { id: 'payments', name: 'Payments', icon: '💳' },
+    { id: 'audit', name: 'Audit', icon: '📋' },
     { id: 'analytics', name: 'Analytics & Traffic', icon: '📈' },
     { id: 'performance', name: 'Performance', icon: '⚡' },
     { id: 'flows', name: 'User Flows', icon: '🧭' },
@@ -587,6 +591,14 @@ export function TabbedDashboard() {
 
       {activeTab === 'sent' && (
         <SentCommsPanel />
+      )}
+
+      {activeTab === 'payments' && (
+        <PaymentsPanel />
+      )}
+
+      {activeTab === 'audit' && (
+        <AuditPanel />
       )}
 
       {activeTab === 'flows' && (

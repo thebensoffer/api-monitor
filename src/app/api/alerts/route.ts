@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { probe } from '@/lib/probe';
+import { dispatchAlert } from '@/lib/notify';
 
 export const dynamic = 'force-dynamic';
 
@@ -74,11 +75,30 @@ export async function GET(request: NextRequest) {
       healthAlert('dbs', 'Dr Ben Soffer', 'https://drbensoffer.com'),
     ]);
 
+    // Fire notifications for non-success alerts (dispatcher dedups within 4h window)
+    const notifications = await Promise.all(
+      alerts
+        .filter((a) => a.type !== 'success')
+        .map(async (a) => ({
+          alertId: a.id,
+          results: await dispatchAlert({
+            id: a.id,
+            type: a.type,
+            title: a.title,
+            message: a.message,
+            severity: a.severity,
+            source: a.source,
+            action: a.action,
+          }).catch(() => []),
+        }))
+    );
+
     return NextResponse.json({
       success: true,
       alerts,
       total: alerts.length,
       active: alerts.filter((a) => a.type !== 'success').length,
+      notifications,
       timestamp: new Date().toISOString(),
     });
   } catch (error) {
