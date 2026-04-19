@@ -16,6 +16,7 @@
 
 import { probe } from './probe';
 import tls from 'node:tls';
+import { dispatchAlert } from './notify';
 
 // Self-fetch base URL — defaults to deployed Amplify URL on prod, localhost on dev.
 function selfBase(): string {
@@ -295,6 +296,74 @@ export const CRON_REGISTRY: CronDef[] = [
       return {
         ok,
         message: ok ? 'GSC snapshot captured' : `GSC API returned ${r.status}`,
+      };
+    },
+  },
+  {
+    id: 'synthetic-journey',
+    group: 'monitoring',
+    schedule: 'rate(1 hour)',
+    description: 'Hourly user-flow probe. Auth/SEO/content/system across all 3 sites; alerts on regression.',
+    handler: async () => {
+      const r = await fetch(`${selfBase()}/api/user-flows`, { headers: selfHeaders() });
+      if (!r.ok) {
+        return { ok: false, message: `user-flows API returned ${r.status}` };
+      }
+      const j = await r.json();
+      const failed = j?.summary?.failed ?? 0;
+      const total = j?.summary?.totalFlows ?? 0;
+      if (failed > 0) {
+        const failedFlows = (j.grouped || []).flatMap((g: any) =>
+          (g.flows || []).filter((f: any) => f.probe.error || (f.probe.response && !f.probe.response.ok))
+            .map((f: any) => `${g.label}/${f.flow}/${f.step}`)
+        );
+        await dispatchAlert({
+          id: `synthetic-journey-${failed}`,
+          type: 'error',
+          title: `Synthetic journey: ${failed}/${total} flows failed`,
+          message: `Failing: ${failedFlows.slice(0, 5).join(', ')}${failedFlows.length > 5 ? '…' : ''}`,
+          severity: 'high',
+          source: 'Synthetic journey cron',
+          action: 'Investigate which flow regressed in OpenHeart User Flows tab',
+        }).catch(() => {});
+      }
+      return {
+        ok: failed === 0,
+        message: failed === 0 ? `All ${total} flows passing` : `${failed}/${total} flows failed`,
+        data: j.summary,
+      };
+    },
+  },
+  {
+    id: 'failed-payment-watchdog',
+    group: 'monitoring',
+    schedule: 'rate(15 minutes)',
+    description: 'Watches /api/payments for newly-failed Stripe charges; high-severity alert per failure.',
+    handler: async () => {
+      const r = await fetch(`${selfBase()}/api/payments?hours=1&limit=50`, { headers: selfHeaders() });
+      if (!r.ok) {
+        return { ok: false, message: `payments API returned ${r.status}` };
+      }
+      const j = await r.json();
+      const failures = j?.failures ?? [];
+      if (failures.length > 0) {
+        // Alert per-failure (notify dedup keeps it sane within the 4h window)
+        for (const f of failures.slice(0, 5)) {
+          await dispatchAlert({
+            id: `payment-failure-${f.id}`,
+            type: 'error',
+            title: `Payment failed: ${f._siteLabel} ${(f.amount / 100).toFixed(2)} USD`,
+            message: `${f.billingEmail || 'unknown patient'} — ${f.outcomeMessage || f.outcomeReason || f.status}`,
+            severity: 'high',
+            source: 'Stripe payment watchdog',
+            action: `Open Payments tab → filter Failures → contact patient for retry`,
+          }).catch(() => {});
+        }
+      }
+      return {
+        ok: failures.length === 0,
+        message: failures.length === 0 ? 'No payment failures in last hour' : `${failures.length} failure(s) in last hour`,
+        data: { failureCount: failures.length, recentFailures: failures.slice(0, 5).map((f: any) => ({ id: f.id, amount: f.amount, site: f._site })) },
       };
     },
   },

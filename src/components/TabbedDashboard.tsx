@@ -18,6 +18,7 @@ import { BuildsPanel } from './BuildsPanel';
 import { LogsPanel } from './LogsPanel';
 import { PaymentsPanel } from './PaymentsPanel';
 import { AuditPanel } from './AuditPanel';
+import { PatientTimelinePanel } from './PatientTimelinePanel';
 
 interface ServiceStatus {
   key: string;
@@ -280,6 +281,7 @@ export function TabbedDashboard() {
     { id: 'overview', name: 'System Overview', icon: '📊' },
     { id: 'sent', name: 'Sent Comms', icon: '📤' },
     { id: 'payments', name: 'Payments', icon: '💳' },
+    { id: 'patient', name: 'Patient Lookup', icon: '🔎' },
     { id: 'audit', name: 'Audit', icon: '📋' },
     { id: 'analytics', name: 'Analytics & Traffic', icon: '📈' },
     { id: 'performance', name: 'Performance', icon: '⚡' },
@@ -595,6 +597,10 @@ export function TabbedDashboard() {
 
       {activeTab === 'payments' && (
         <PaymentsPanel />
+      )}
+
+      {activeTab === 'patient' && (
+        <PatientTimelinePanel />
       )}
 
       {activeTab === 'audit' && (
