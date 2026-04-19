@@ -17,6 +17,7 @@
 import { probe } from './probe';
 import tls from 'node:tls';
 import { dispatchAlert } from './notify';
+import { getAllLatest as getAllSyntheticLatest } from './synthetic';
 
 // Self-fetch base URL — defaults to deployed Amplify URL on prod, localhost on dev.
 function selfBase(): string {
@@ -303,12 +304,11 @@ export const CRON_REGISTRY: CronDef[] = [
     id: 'synthetic-journey',
     group: 'monitoring',
     schedule: 'rate(1 hour)',
-    description: 'Hourly user-flow probe. Auth/SEO/content/system across all 3 sites; alerts on regression.',
+    description: 'Hourly user-flow probe + external synthetic-report check. Alerts on flow regression OR stale browser-based reports from Khai.',
     handler: async () => {
+      // 1) Internal probes
       const r = await fetch(`${selfBase()}/api/user-flows`, { headers: selfHeaders() });
-      if (!r.ok) {
-        return { ok: false, message: `user-flows API returned ${r.status}` };
-      }
+      if (!r.ok) return { ok: false, message: `user-flows API returned ${r.status}` };
       const j = await r.json();
       const failed = j?.summary?.failed ?? 0;
       const total = j?.summary?.totalFlows ?? 0;
@@ -327,11 +327,148 @@ export const CRON_REGISTRY: CronDef[] = [
           action: 'Investigate which flow regressed in OpenHeart User Flows tab',
         }).catch(() => {});
       }
+
+      // 2) External browser-based reports (Khai or future remote runner)
+      const externalReports = await getAllSyntheticLatest().catch(() => ({}));
+      const externalScenarios = Object.values(externalReports);
+      const externalFailed = externalScenarios.filter((s) => !s.ok);
+      const externalStale = externalScenarios.filter((s) => Date.now() - new Date(s.ts).getTime() > 2 * 60 * 60 * 1000);
+
+      for (const f of externalFailed) {
+        await dispatchAlert({
+          id: `synthetic-external-fail-${f.scenario}`,
+          type: 'error',
+          title: `Browser-flow regression: ${f.scenario}`,
+          message: f.message || 'Khai reported failure',
+          severity: 'high',
+          source: f.source || 'Synthetic external',
+          action: 'Open OpenHeart Synthetic tab → drill into the failing scenario',
+        }).catch(() => {});
+      }
+      for (const s of externalStale) {
+        await dispatchAlert({
+          id: `synthetic-external-stale-${s.scenario}`,
+          type: 'warning',
+          title: `Synthetic runner silent: ${s.scenario}`,
+          message: `No report in ${Math.floor((Date.now() - new Date(s.ts).getTime()) / 60000)} min — runner may be down`,
+          severity: 'medium',
+          source: 'Synthetic monitor',
+          action: 'Check Khai is running locally or remote runner deployment',
+        }).catch(() => {});
+      }
+
       return {
-        ok: failed === 0,
-        message: failed === 0 ? `All ${total} flows passing` : `${failed}/${total} flows failed`,
-        data: j.summary,
+        ok: failed === 0 && externalFailed.length === 0,
+        message: `Probes: ${total - failed}/${total} pass · External: ${externalScenarios.length - externalFailed.length}/${externalScenarios.length} pass${externalStale.length ? ` · ${externalStale.length} stale` : ''}`,
+        data: { internal: j.summary, externalScenarios: externalScenarios.length, externalFailed: externalFailed.length, externalStale: externalStale.length },
       };
+    },
+  },
+  {
+    id: 'cron-watchdog',
+    group: 'monitoring',
+    schedule: 'rate(1 hour)',
+    description: 'Watcher-of-watchers: alerts if any frequently-firing cron hasn\'t recorded a run recently. Catches "OpenHeart silently went blind".',
+    handler: async () => {
+      const r = await fetch(`${selfBase()}/api/cron`, { headers: selfHeaders() });
+      if (!r.ok) return { ok: false, message: `cron API returned ${r.status}` };
+      const j = await r.json();
+      const now = Date.now();
+      const stale: { id: string; ageMin: number; expectedMaxMin: number }[] = [];
+      for (const c of j.crons || []) {
+        // Parse expected interval from schedule (rate(N minutes/hours) only)
+        let maxMin: number | null = null;
+        const rateMatch = (c.schedule as string).match(/rate\((\d+)\s+(minutes?|hours?)\)/);
+        if (rateMatch) {
+          const n = parseInt(rateMatch[1], 10);
+          maxMin = rateMatch[2].startsWith('hour') ? n * 60 : n;
+          maxMin = Math.floor(maxMin * 2.5); // allow 2.5x grace
+        }
+        if (!maxMin) continue;
+        if (!c.lastRun) {
+          stale.push({ id: c.id, ageMin: -1, expectedMaxMin: maxMin });
+          continue;
+        }
+        const ageMin = Math.floor((now - new Date(c.lastRun.startedAt).getTime()) / 60000);
+        if (ageMin > maxMin) stale.push({ id: c.id, ageMin, expectedMaxMin: maxMin });
+      }
+
+      if (stale.length > 0) {
+        await dispatchAlert({
+          id: `cron-watchdog-${stale.map((s) => s.id).sort().join(',')}`,
+          type: 'error',
+          title: `${stale.length} cron(s) silent past expected interval`,
+          message: stale.map((s) => `${s.id}: ${s.ageMin === -1 ? 'never' : s.ageMin + 'm'} (expected <${s.expectedMaxMin}m)`).join('; '),
+          severity: 'high',
+          source: 'Cron watchdog',
+          action: 'Check EventBridge rules + openheart-cron Lambda in AWS',
+        }).catch(() => {});
+      }
+
+      return {
+        ok: stale.length === 0,
+        message: stale.length === 0
+          ? `All rate-based crons firing within expected interval`
+          : `${stale.length} stale: ${stale.map((s) => s.id).join(', ')}`,
+        data: { stale },
+      };
+    },
+  },
+  {
+    id: 'aws-cost-monitor',
+    group: 'monitoring',
+    schedule: 'cron(0 13 * * ? *)',
+    description: 'Daily AWS cost check via Cost Explorer. Alerts on >50% day-over-day spike.',
+    handler: async () => {
+      const accessKeyId = process.env.OPENHEART_AWS_ACCESS_KEY_ID || process.env.AWS_ACCESS_KEY_ID;
+      const secretAccessKey = process.env.OPENHEART_AWS_SECRET_ACCESS_KEY || process.env.AWS_SECRET_ACCESS_KEY;
+      if (!accessKeyId || !secretAccessKey) {
+        return { ok: false, message: 'AWS credentials missing' };
+      }
+      try {
+        const { CostExplorerClient, GetCostAndUsageCommand } = await import('@aws-sdk/client-cost-explorer');
+        const ce = new CostExplorerClient({
+          region: 'us-east-1', // Cost Explorer is global but only callable in us-east-1
+          credentials: { accessKeyId, secretAccessKey },
+        });
+        const today = new Date();
+        const end = today.toISOString().slice(0, 10);
+        const start = new Date(today.getTime() - 7 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+        const r = await ce.send(new GetCostAndUsageCommand({
+          TimePeriod: { Start: start, End: end },
+          Granularity: 'DAILY',
+          Metrics: ['UnblendedCost'],
+        }));
+        const days = (r.ResultsByTime ?? []).map((d) => ({
+          date: d.TimePeriod?.Start,
+          amount: parseFloat(d.Total?.UnblendedCost?.Amount ?? '0'),
+        })).filter((d) => d.amount > 0);
+        if (days.length < 2) {
+          return { ok: true, message: 'Not enough cost data yet', data: { days } };
+        }
+        const yesterday = days[days.length - 1];
+        const dayBefore = days[days.length - 2];
+        const ratio = dayBefore.amount > 0 ? yesterday.amount / dayBefore.amount : 1;
+        const spike = ratio > 1.5;
+        if (spike) {
+          await dispatchAlert({
+            id: `cost-spike-${yesterday.date}`,
+            type: 'warning',
+            title: `AWS cost spike: $${yesterday.amount.toFixed(2)} (${Math.round((ratio - 1) * 100)}% above prior day)`,
+            message: `Yesterday: $${yesterday.amount.toFixed(2)}, day before: $${dayBefore.amount.toFixed(2)}. Investigate unusual usage.`,
+            severity: 'medium',
+            source: 'AWS cost monitor',
+            action: 'Open AWS Cost Explorer; check for runaway Lambda, S3 egress, or NAT gateway',
+          }).catch(() => {});
+        }
+        return {
+          ok: true,
+          message: `Last 7d: $${days.reduce((s, d) => s + d.amount, 0).toFixed(2)} total · yesterday $${yesterday.amount.toFixed(2)}${spike ? ' ⚠ SPIKE' : ''}`,
+          data: { days, yesterday, ratio },
+        };
+      } catch (err) {
+        return { ok: false, message: err instanceof Error ? err.message : 'Cost Explorer failed' };
+      }
     },
   },
   {

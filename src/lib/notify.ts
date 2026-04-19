@@ -82,9 +82,7 @@ async function recordNotified(alertId: string, channel: string, detail: string) 
 }
 
 async function sendEmail(alert: NotifyAlert): Promise<NotifyResult> {
-  const apiKey = process.env.RESEND_API_KEY || process.env.NOTIFY_RESEND_API_KEY;
   const to = process.env.NOTIFY_EMAIL_TO;
-  if (!apiKey) return { channel: 'email', ok: false, detail: 'No RESEND_API_KEY' };
   if (!to) return { channel: 'email', ok: false, detail: 'No NOTIFY_EMAIL_TO' };
 
   const subject = `[OpenHeart ${alert.severity.toUpperCase()}] ${alert.title}`;
@@ -103,21 +101,47 @@ async function sendEmail(alert: NotifyAlert): Promise<NotifyResult> {
     </div>
   `.trim();
 
+  // Prefer SES (matches the rest of the platform); fall back to Resend if AWS creds unavailable.
+  const accessKeyId = process.env.OPENHEART_AWS_ACCESS_KEY_ID || process.env.AWS_ACCESS_KEY_ID;
+  const secretAccessKey = process.env.OPENHEART_AWS_SECRET_ACCESS_KEY || process.env.AWS_SECRET_ACCESS_KEY;
+  const fromAddress = process.env.NOTIFY_EMAIL_FROM || 'noreply@drbensoffer.com';
+
+  if (accessKeyId && secretAccessKey) {
+    try {
+      const { SESClient, SendEmailCommand } = await import('@aws-sdk/client-ses');
+      const ses = new SESClient({
+        region: process.env.OPENHEART_AWS_REGION || 'us-east-1',
+        credentials: { accessKeyId, secretAccessKey },
+      });
+      const r = await ses.send(new SendEmailCommand({
+        Source: fromAddress,
+        Destination: { ToAddresses: [to] },
+        Message: {
+          Subject: { Data: subject, Charset: 'UTF-8' },
+          Body: { Html: { Data: html, Charset: 'UTF-8' } },
+        },
+      }));
+      return { channel: 'email', ok: true, detail: `ses-msg=${r.MessageId}` };
+    } catch (err: any) {
+      // If SES fails (e.g. unverified sender), try Resend as fallback before giving up
+      const resendKey = process.env.NOTIFY_RESEND_API_KEY || process.env.RESEND_API_KEY;
+      if (!resendKey) return { channel: 'email', ok: false, detail: `SES: ${err?.message || 'unknown'}` };
+    }
+  }
+
+  const resendKey = process.env.NOTIFY_RESEND_API_KEY || process.env.RESEND_API_KEY;
+  if (!resendKey) return { channel: 'email', ok: false, detail: 'No SES creds and no Resend key' };
+
   try {
     const r = await fetch('https://api.resend.com/emails', {
       method: 'POST',
-      headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        from: process.env.NOTIFY_EMAIL_FROM || 'OpenHeart <noreply@drbensoffer.com>',
-        to: [to],
-        subject,
-        html,
-      }),
+      headers: { Authorization: `Bearer ${resendKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ from: `OpenHeart <${fromAddress}>`, to: [to], subject, html }),
       signal: AbortSignal.timeout(10000),
     });
     const j = await r.json().catch(() => ({}));
-    if (!r.ok) return { channel: 'email', ok: false, detail: `${r.status} ${j.error?.message || j.message || ''}`.trim() };
-    return { channel: 'email', ok: true, detail: `id=${j.id}` };
+    if (!r.ok) return { channel: 'email', ok: false, detail: `resend ${r.status} ${j.error?.message || ''}`.trim() };
+    return { channel: 'email', ok: true, detail: `resend-id=${j.id}` };
   } catch (err) {
     return { channel: 'email', ok: false, detail: err instanceof Error ? err.message : 'fetch failed' };
   }
