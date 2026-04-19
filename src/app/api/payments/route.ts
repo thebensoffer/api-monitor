@@ -48,37 +48,42 @@ export async function GET(request: NextRequest) {
   const allOrders = results.flatMap((r) => r.orders);
 
   // DK + Tovani share the same Stripe account → both endpoints return the
-  // SAME charges, just labeled differently. Build paymentIntentId → site
-  // attribution from the Order tables (each Order knows its true owner)
-  // and dedupe by charge id.
+  // SAME charges, just labeled by which endpoint answered. Attribution priority:
+  //   1. paymentIntentId matches an Order in some site's DB → use that site
+  //   2. fallback to DK (per actual ownership of the shared Stripe account)
   const piToSite: Record<string, { site: string; label: string }> = {};
   for (const o of allOrders) {
     if (o.stripePaymentIntentId) {
       piToSite[o.stripePaymentIntentId] = { site: o._site, label: o._siteLabel };
     }
   }
+  const FALLBACK_SITE = process.env.SHARED_STRIPE_FALLBACK_SITE || 'dk';
+  const FALLBACK_LABEL =
+    SITES.find((s) => s.key === FALLBACK_SITE)?.label || 'Discreet Ketamine';
 
   const dedupCharges: Record<string, any> = {};
   for (const r of results) {
     for (const c of r.charges) {
       if (!c.id) continue;
-      // Use existing entry's attribution if we've already seen this charge id
-      const existing = dedupCharges[c.id];
       const truthAttr = c.paymentIntentId ? piToSite[c.paymentIntentId] : null;
-      const finalAttr = truthAttr || existing || { site: c._site, label: c._siteLabel };
+      const finalAttr =
+        truthAttr ||
+        dedupCharges[c.id] ||
+        { site: FALLBACK_SITE, label: FALLBACK_LABEL };
       dedupCharges[c.id] = { ...c, _site: finalAttr.site, _siteLabel: finalAttr.label };
     }
   }
   const allCharges = Object.values(dedupCharges);
 
-  // Same dedup for refunds (they reference paymentIntentId too)
   const dedupRefunds: Record<string, any> = {};
   for (const r of results) {
     for (const refund of r.refunds) {
       if (!refund.id) continue;
-      const existing = dedupRefunds[refund.id];
       const truthAttr = refund.paymentIntentId ? piToSite[refund.paymentIntentId] : null;
-      const finalAttr = truthAttr || existing || { site: refund._site, label: refund._siteLabel };
+      const finalAttr =
+        truthAttr ||
+        dedupRefunds[refund.id] ||
+        { site: FALLBACK_SITE, label: FALLBACK_LABEL };
       dedupRefunds[refund.id] = { ...refund, _site: finalAttr.site, _siteLabel: finalAttr.label };
     }
   }
