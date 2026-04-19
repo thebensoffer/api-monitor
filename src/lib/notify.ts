@@ -2,16 +2,21 @@
  * Notification dispatcher — gets alerts OUT of the dashboard.
  *
  * dispatch() takes an Alert and sends via:
- *   - Resend (email to NOTIFY_EMAIL_TO)
+ *   - SES email (NOTIFY_EMAIL_TO)
  *   - Twilio (SMS to NOTIFY_SMS_TO) if both Twilio creds + phone set
  *   - Slack incoming webhook (NOTIFY_SLACK_WEBHOOK) if set
  *
+ * Each alert is auto-diagnosed by Claude (triage agent) and the email
+ * embeds the diagnosis + magic-link buttons for one-tap fixes.
+ *
  * Dedup: each (alertId, channel) pair recorded in DynamoDB
- * `openheart-cron-runs` (reused) so we don't spam on every poll.
+ * `openheart-notifications` so we don't spam on every poll.
  */
 
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, GetCommand, PutCommand } from '@aws-sdk/lib-dynamodb';
+import { triageAlert, type TriageResult } from './triage';
+import { signFixToken } from './fix-tokens';
 
 const TABLE = 'openheart-notifications';
 const DEDUP_WINDOW_HOURS = 4;
@@ -81,21 +86,64 @@ async function recordNotified(alertId: string, channel: string, detail: string) 
   );
 }
 
-async function sendEmail(alert: NotifyAlert): Promise<NotifyResult> {
+async function sendEmail(alert: NotifyAlert, triage?: TriageResult | null): Promise<NotifyResult> {
   const to = process.env.NOTIFY_EMAIL_TO;
   if (!to) return { channel: 'email', ok: false, detail: 'No NOTIFY_EMAIL_TO' };
 
-  const subject = `[OpenHeart ${alert.severity.toUpperCase()}] ${alert.title}`;
+  // Action-needed badge for the subject line — instantly readable
+  const actionBadge =
+    triage?.actionNeeded === 'none' ? ' [no action]' :
+    triage?.actionNeeded === 'auto-fixable' ? ' [auto-fixable]' :
+    triage?.actionNeeded === 'human' ? ' [needs human]' :
+    triage?.actionNeeded === 'monitor' ? ' [monitor]' :
+    '';
+  const subject = `[OpenHeart ${alert.severity.toUpperCase()}]${actionBadge} ${alert.title}`;
+
+  // Build magic-link buttons if triage suggests an auto-fix
+  let fixButtons = '';
+  if (triage?.fixAction && process.env.FIX_TOKEN_SECRET) {
+    try {
+      const token = signFixToken({
+        actionId: triage.fixAction.id,
+        params: triage.fixAction.params,
+        alertId: alert.id,
+        mode: 'execute',
+        expiresAt: Date.now() + 30 * 60 * 1000,
+      });
+      const baseUrl = process.env.OPENHEART_SELF_URL || 'https://main.dl7zrj8lm47be.amplifyapp.com';
+      const link = `${baseUrl}/api/fix-action/execute?t=${encodeURIComponent(token)}`;
+      fixButtons = `
+        <div style="margin:20px 0;padding:14px;background:#fef3c7;border-left:4px solid #f59e0b;border-radius:4px">
+          <div style="font-weight:600;margin-bottom:8px">🔧 Suggested fix: <code>${triage.fixAction.id}</code></div>
+          <div style="font-size:12px;color:#666;margin-bottom:10px">Params: <code>${JSON.stringify(triage.fixAction.params)}</code></div>
+          <a href="${link}" style="display:inline-block;padding:10px 16px;background:#dc2626;color:#fff;text-decoration:none;border-radius:6px;font-weight:600">▶ Apply fix (preview first)</a>
+          <div style="font-size:11px;color:#888;margin-top:8px">Magic link expires in 30 min · token authorizes one specific fix · audit-logged</div>
+        </div>`;
+    } catch (e) {
+      // FIX_TOKEN_SECRET missing or sign failed — fall through without buttons
+    }
+  }
+
+  const triageBlock = triage ? `
+    <div style="margin:16px 0;padding:14px;background:#f3f4f6;border-radius:6px;border-left:4px solid ${triage.severity === 'high' ? '#dc2626' : triage.severity === 'medium' ? '#f59e0b' : '#3b82f6'}">
+      <div style="font-size:11px;color:#666;text-transform:uppercase;letter-spacing:0.05em;font-weight:600">🤖 Triage diagnosis · confidence: ${triage.confidence}</div>
+      <div style="margin:6px 0">${triage.diagnosis}</div>
+      <div style="margin-top:8px"><strong>Recommended:</strong> ${triage.recommendedFix}</div>
+      <div style="margin-top:6px;font-size:12px"><strong>Action needed:</strong> <code>${triage.actionNeeded}</code></div>
+    </div>` : '';
+
   const html = `
-    <div style="font-family:system-ui;padding:16px">
-      <h2 style="color:${alert.type === 'error' ? '#b91c1c' : alert.type === 'warning' ? '#a16207' : '#1e40af'}">${alert.title}</h2>
-      <p>${alert.message}</p>
-      <table style="margin-top:16px;font-size:13px">
-        <tr><td><b>Source</b></td><td>${alert.source}</td></tr>
-        <tr><td><b>Severity</b></td><td>${alert.severity}</td></tr>
-        ${alert.action ? `<tr><td><b>Action</b></td><td>${alert.action}</td></tr>` : ''}
+    <div style="font-family:system-ui;max-width:560px;padding:16px">
+      <h2 style="color:${alert.type === 'error' ? '#b91c1c' : alert.type === 'warning' ? '#a16207' : '#1e40af'};margin-bottom:8px">${alert.title}</h2>
+      <p style="margin:0 0 12px 0">${alert.message}</p>
+      ${triageBlock}
+      ${fixButtons}
+      <table style="margin-top:16px;font-size:13px;color:#444">
+        <tr><td style="padding:2px 8px 2px 0"><b>Source</b></td><td>${alert.source}</td></tr>
+        <tr><td style="padding:2px 8px 2px 0"><b>Severity</b></td><td>${alert.severity}${triage && triage.severity !== alert.severity ? ` (triage: ${triage.severity})` : ''}</td></tr>
+        ${alert.action ? `<tr><td style="padding:2px 8px 2px 0"><b>Probe action</b></td><td>${alert.action}</td></tr>` : ''}
       </table>
-      <p style="font-size:12px;color:#666;margin-top:24px">
+      <p style="font-size:12px;color:#666;margin-top:24px;border-top:1px solid #eee;padding-top:12px">
         OpenHeart · <a href="https://main.dl7zrj8lm47be.amplifyapp.com/dashboard">Open dashboard</a>
       </p>
     </div>
@@ -193,10 +241,25 @@ async function sendSlack(alert: NotifyAlert): Promise<NotifyResult> {
 }
 
 export async function dispatchAlert(alert: NotifyAlert): Promise<NotifyResult[]> {
-  // Only route severity=high for now; medium = email only; low = no notify
+  // Triage first (Phase 1). Returns null if ANTHROPIC_API_KEY unset — system still works.
+  const triage = await triageAlert({
+    id: alert.id,
+    type: alert.type,
+    title: alert.title,
+    message: alert.message,
+    severity: alert.severity,
+    source: alert.source,
+    action: alert.action,
+  }).catch(() => null);
+
+  // Triage can downgrade severity to "none" (= don't notify at all)
+  const effectiveSeverity = triage?.actionNeeded === 'none' ? 'low' : alert.severity;
+
+  // Routing: high → email+sms+slack, medium → email+slack, low → email only
   const channels: ('email' | 'sms' | 'slack')[] =
-    alert.severity === 'high' ? ['email', 'sms', 'slack'] :
-    alert.severity === 'medium' ? ['email', 'slack'] :
+    effectiveSeverity === 'high' ? ['email', 'sms', 'slack'] :
+    effectiveSeverity === 'medium' ? ['email', 'slack'] :
+    effectiveSeverity === 'low' && triage?.actionNeeded !== 'none' ? ['email'] :
     [];
 
   if (channels.length === 0) return [];
@@ -207,7 +270,7 @@ export async function dispatchAlert(alert: NotifyAlert): Promise<NotifyResult[]>
       results.push({ channel: ch, ok: true, detail: 'deduped (already sent within window)' });
       continue;
     }
-    const res = ch === 'email' ? await sendEmail(alert)
+    const res = ch === 'email' ? await sendEmail(alert, triage)
               : ch === 'sms'   ? await sendSms(alert)
               :                  await sendSlack(alert);
     results.push(res);

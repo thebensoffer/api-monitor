@@ -466,11 +466,118 @@ export const CRON_REGISTRY: CronDef[] = [
     id: 'email-alert-triage',
     group: 'monitoring',
     schedule: 'rate(10 minutes)',
-    description: 'Pulls recent inbound alert emails and routes them by severity.',
+    description:
+      'Classifies inbound alert@ emails from Tovani/DK/DBS via Bedrock Haiku, records what the agent *would* do (Phase 1 shadow), dispatches a summary alert when new items land.',
     handler: async () => {
+      const { listUntriaged, markTriaged, platformForDomain } = await import(
+        '@/lib/alert-triage/inbox'
+      );
+      const { classifyAlert } = await import('@/lib/alert-triage/classify');
+      const { getActionHandler, isActionEnabled } = await import('@/lib/alert-triage/actions');
+      const { putTriageItem } = await import('@/lib/alert-triage/items');
+      const { dispatchAlert } = await import('@/lib/notify');
+
+      let scanned = 0;
+      let created = 0;
+      let failed = 0;
+      const byBucket: Record<string, number> = {
+        routine: 0,
+        auto_fix: 0,
+        investigate: 0,
+        escalate: 0,
+      };
+      const sampleSubjects: string[] = [];
+
+      const rows = await listUntriaged(50);
+      scanned = rows.length;
+
+      for (const row of rows) {
+        try {
+          const classification = await classifyAlert({
+            id: row.id,
+            fromEmail: row.fromEmail,
+            subject: row.subject,
+            body: row.textBody || '',
+            snippet: row.snippet || '',
+            receivedAt: new Date(row.receivedAt),
+            platform: row.platform || platformForDomain(row.recipientDomain),
+          });
+
+          // Phase-1 shadow: invoke handler stub when present, never execute real work.
+          let actionResult: Record<string, unknown> | null = null;
+          if (classification.proposedAction) {
+            const handler = getActionHandler(classification.proposedAction);
+            if (handler) {
+              const mode = isActionEnabled(classification.proposedAction) ? 'executed' : 'shadow';
+              try {
+                const r = await handler(classification.actionParams, {
+                  platform: (row.platform as any) || 'unknown',
+                  sourceMessageId: row.id,
+                  subject: row.subject,
+                });
+                actionResult = { ...r, intendedMode: mode };
+              } catch (err: any) {
+                actionResult = { ok: false, mode, summary: `Handler threw: ${err?.message}` };
+              }
+            }
+          }
+
+          await putTriageItem({
+            inboundEmailId: row.id,
+            platform: row.platform || platformForDomain(row.recipientDomain),
+            fromEmail: row.fromEmail,
+            subject: row.subject,
+            receivedAt: row.receivedAt,
+            bodySnippet: row.textBody || row.snippet || '',
+            classification,
+            actionStatus: actionResult ? 'shadow' : 'skipped',
+            actionResult,
+          });
+          await markTriaged(row.id, row.receivedAt);
+
+          byBucket[classification.bucket] = (byBucket[classification.bucket] || 0) + 1;
+          if (
+            classification.bucket !== 'routine' &&
+            sampleSubjects.length < 5
+          ) {
+            sampleSubjects.push(`[${classification.bucket}] ${row.subject.slice(0, 80)}`);
+          }
+          created++;
+        } catch (err: any) {
+          console.error('[email-alert-triage] row failed', { id: row.id, err: err?.message });
+          failed++;
+        }
+      }
+
+      // Severity routing: escalate > auto_fix > investigate > routine
+      const worstSeverity: 'high' | 'medium' | 'low' =
+        byBucket.escalate > 0 ? 'high' : byBucket.auto_fix > 0 ? 'medium' : byBucket.investigate > 0 ? 'low' : 'low';
+
+      // Only emit a notification when something new landed
+      if (created > 0) {
+        try {
+          await dispatchAlert({
+            id: `alert-triage-${new Date().toISOString().slice(0, 13)}`, // hourly dedup bucket
+            type:
+              byBucket.escalate > 0 ? 'error' : byBucket.auto_fix > 0 ? 'warning' : 'info',
+            severity: worstSeverity,
+            title: `Alert triage: ${created} new (${byBucket.escalate}🚨 ${byBucket.auto_fix}🛠️ ${byBucket.investigate}🔎 ${byBucket.routine}✅)`,
+            message:
+              sampleSubjects.length > 0
+                ? sampleSubjects.join('\n')
+                : `${created} routine alerts classified, nothing needing attention.`,
+            source: 'alert-triage cron',
+            action: 'Open dashboard → Triage tab for details',
+          });
+        } catch (err: any) {
+          console.error('[email-alert-triage] dispatchAlert failed', err?.message);
+        }
+      }
+
       return {
         ok: true,
-        message: 'Triage stub — wire IMAP / inbound webhook to enable',
+        message: `scanned ${scanned}, triaged ${created}, failed ${failed}`,
+        data: { scanned, created, failed, byBucket },
       };
     },
   },
