@@ -967,6 +967,342 @@ export const CRON_REGISTRY: CronDef[] = [
     },
   },
   {
+    id: 'public-s3-scanner',
+    group: 'monitoring',
+    schedule: 'cron(0 8 * * ? *)',
+    description: 'Daily scan of every S3 bucket in the account for public ACLs, public bucket policies, or missing PublicAccessBlock. Critical for HIPAA — already prevented one accidental exposure (dk-blog-static).',
+    handler: async () => {
+      const accessKeyId = process.env.OPENHEART_AWS_ACCESS_KEY_ID || process.env.AWS_ACCESS_KEY_ID;
+      const secretAccessKey = process.env.OPENHEART_AWS_SECRET_ACCESS_KEY || process.env.AWS_SECRET_ACCESS_KEY;
+      if (!accessKeyId || !secretAccessKey) return { ok: false, message: 'AWS creds missing' };
+      try {
+        const {
+          S3Client,
+          ListBucketsCommand,
+          GetBucketAclCommand,
+          GetBucketPolicyStatusCommand,
+          GetPublicAccessBlockCommand,
+          GetBucketLocationCommand,
+        } = await import('@aws-sdk/client-s3');
+        const s3 = new S3Client({
+          region: process.env.OPENHEART_AWS_REGION || 'us-east-1',
+          credentials: { accessKeyId, secretAccessKey },
+        });
+
+        const buckets = await s3.send(new ListBucketsCommand({}));
+        const findings: { bucket: string; reasons: string[]; severity: 'low' | 'medium' | 'high' }[] = [];
+
+        // Bound the scan — > 200 buckets is unusual; protects Lambda runtime
+        const slice = (buckets.Buckets || []).slice(0, 200);
+        for (const b of slice) {
+          if (!b.Name) continue;
+          const reasons: string[] = [];
+
+          // 1. PublicAccessBlock — best-practice baseline
+          let pabAllowsPublic = true; // assume risky if missing
+          try {
+            const pab = await s3.send(new GetPublicAccessBlockCommand({ Bucket: b.Name }));
+            const cfg = pab.PublicAccessBlockConfiguration;
+            const allBlocked = cfg?.BlockPublicAcls && cfg?.BlockPublicPolicy && cfg?.IgnorePublicAcls && cfg?.RestrictPublicBuckets;
+            pabAllowsPublic = !allBlocked;
+            if (!allBlocked) reasons.push('PublicAccessBlock not fully enabled');
+          } catch (e: any) {
+            // NoSuchPublicAccessBlockConfiguration → no PAB at all
+            if (e?.name === 'NoSuchPublicAccessBlockConfiguration') {
+              reasons.push('No PublicAccessBlock configured');
+              pabAllowsPublic = true;
+            }
+          }
+
+          // 2. ACL — only matters if PAB doesn't already block ACLs
+          if (pabAllowsPublic) {
+            try {
+              const acl = await s3.send(new GetBucketAclCommand({ Bucket: b.Name }));
+              for (const grant of acl.Grants || []) {
+                const uri = grant.Grantee?.URI || '';
+                if (uri.includes('AllUsers') || uri.includes('AuthenticatedUsers')) {
+                  reasons.push(`ACL grants ${uri.split('/').pop()} ${grant.Permission}`);
+                }
+              }
+            } catch {}
+          }
+
+          // 3. Bucket policy — check public via PolicyStatus
+          if (pabAllowsPublic) {
+            try {
+              const ps = await s3.send(new GetBucketPolicyStatusCommand({ Bucket: b.Name }));
+              if (ps.PolicyStatus?.IsPublic) reasons.push('Bucket policy is public');
+            } catch {} // NoSuchBucketPolicy is fine
+          }
+
+          if (reasons.length > 0) {
+            // Severity: missing PAB alone = low; actual public ACL/policy = high
+            const hasRealExposure = reasons.some((r) => r.includes('ACL grants') || r.includes('policy is public'));
+            findings.push({
+              bucket: b.Name,
+              reasons,
+              severity: hasRealExposure ? 'high' : 'low',
+            });
+          }
+        }
+
+        const exposed = findings.filter((f) => f.severity === 'high');
+        if (exposed.length > 0) {
+          await dispatchAlert({
+            id: `s3-public-${exposed.map((e) => e.bucket).sort().join(',')}`,
+            type: 'error',
+            title: `🚨 ${exposed.length} S3 bucket(s) publicly accessible`,
+            message: exposed.map((e) => `${e.bucket}: ${e.reasons.join('; ')}`).join(' · '),
+            severity: 'high',
+            source: 'S3 public-bucket scanner',
+            action: 'Open S3 console → Permissions → enable Block Public Access OR audit ACL/policy',
+          }).catch(() => {});
+        }
+
+        return {
+          ok: exposed.length === 0,
+          message:
+            exposed.length === 0
+              ? `Scanned ${slice.length} buckets — none publicly exposed${findings.length ? ` (${findings.length} have weak PAB but no public grant)` : ''}`
+              : `${exposed.length} bucket(s) PUBLIC: ${exposed.map((e) => e.bucket).join(', ')}`,
+          data: { totalBuckets: buckets.Buckets?.length ?? 0, scanned: slice.length, findings },
+        };
+      } catch (err) {
+        return { ok: false, message: err instanceof Error ? err.message : 'S3 scan failed' };
+      }
+    },
+  },
+  {
+    id: 'phi-log-scanner',
+    group: 'monitoring',
+    schedule: 'cron(0 7 ? * MON *)',
+    description: 'Weekly sweep of CloudWatch log groups for accidental PHI leakage (emails, US phone numbers) in error stacks. HIPAA: PHI in logs = breach risk.',
+    handler: async () => {
+      const accessKeyId = process.env.OPENHEART_AWS_ACCESS_KEY_ID || process.env.AWS_ACCESS_KEY_ID;
+      const secretAccessKey = process.env.OPENHEART_AWS_SECRET_ACCESS_KEY || process.env.AWS_SECRET_ACCESS_KEY;
+      if (!accessKeyId || !secretAccessKey) return { ok: false, message: 'AWS creds missing' };
+      try {
+        const { CloudWatchLogsClient, DescribeLogGroupsCommand, FilterLogEventsCommand } =
+          await import('@aws-sdk/client-cloudwatch-logs');
+        const cw = new CloudWatchLogsClient({
+          region: process.env.OPENHEART_AWS_REGION || 'us-east-1',
+          credentials: { accessKeyId, secretAccessKey },
+        });
+
+        // Only scan log groups we care about — Amplify SSR + Lambda for our 3 apps + OpenHeart
+        const targets = ['/aws/lambda/', '/aws/amplify/'];
+        const groups: string[] = [];
+        for (const prefix of targets) {
+          let token: string | undefined;
+          do {
+            const r = await cw.send(new DescribeLogGroupsCommand({
+              logGroupNamePrefix: prefix,
+              nextToken: token,
+              limit: 50,
+            }));
+            for (const g of r.logGroups || []) {
+              if (g.logGroupName) groups.push(g.logGroupName);
+            }
+            token = r.nextToken;
+          } while (token && groups.length < 200);
+        }
+
+        // Email regex: loose enough to catch most patient emails; PHI risk
+        // Phone regex: US 10-digit, with or without country code/punctuation
+        // Filter pattern syntax (CloudWatch): use literal substrings for OR; we'll
+        // download a small slice and regex client-side for accuracy.
+        const sevenDaysAgo = Date.now() - 7 * 24 * 60 * 60 * 1000;
+        const emailRe = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b/;
+        const phoneRe = /(?<!\d)(?:\+?1[-.\s]?)?\(?[2-9]\d{2}\)?[-.\s]?\d{3}[-.\s]?\d{4}(?!\d)/;
+        // Domains we *expect* in logs (our own infra) — skip to reduce noise
+        const allowedEmailDomains = ['amazonaws.com', 'sentry.io', 'noreply', 'example.com'];
+
+        const findings: { logGroup: string; ts: string; sample: string; type: 'email' | 'phone' }[] = [];
+        let scanned = 0;
+
+        // Scan max 30 log groups per run, 100 events each — keeps Lambda < 60s
+        for (const group of groups.slice(0, 30)) {
+          try {
+            const r = await cw.send(new FilterLogEventsCommand({
+              logGroupName: group,
+              startTime: sevenDaysAgo,
+              filterPattern: '?ERROR ?Error ?error ?WARN ?@', // keyword OR pattern
+              limit: 100,
+            }));
+            scanned += r.events?.length ?? 0;
+            for (const ev of r.events || []) {
+              const msg = ev.message || '';
+              const emailMatch = msg.match(emailRe);
+              const phoneMatch = msg.match(phoneRe);
+              if (emailMatch) {
+                const email = emailMatch[0].toLowerCase();
+                if (!allowedEmailDomains.some((d) => email.includes(d))) {
+                  findings.push({
+                    logGroup: group,
+                    ts: new Date(ev.timestamp || 0).toISOString(),
+                    sample: email.replace(/(.{2}).+(@.+)/, '$1***$2'), // mask before storing
+                    type: 'email',
+                  });
+                }
+              }
+              if (phoneMatch) {
+                const digits = phoneMatch[0].replace(/\D/g, '').slice(-10);
+                findings.push({
+                  logGroup: group,
+                  ts: new Date(ev.timestamp || 0).toISOString(),
+                  sample: `***-***-${digits.slice(-4)}`,
+                  type: 'phone',
+                });
+              }
+            }
+          } catch {} // skip log groups we can't read
+        }
+
+        // Dedup findings by logGroup+sample so noisy single events don't spam
+        const dedup = new Map<string, typeof findings[0]>();
+        for (const f of findings) dedup.set(`${f.logGroup}|${f.sample}`, f);
+        const unique = Array.from(dedup.values());
+
+        if (unique.length > 0) {
+          await dispatchAlert({
+            id: `phi-in-logs-${new Date().toISOString().slice(0, 10)}`,
+            type: 'warning',
+            title: `Possible PHI in logs: ${unique.length} match(es) across ${new Set(unique.map((u) => u.logGroup)).size} log group(s)`,
+            message: unique.slice(0, 10).map((u) => `[${u.type}] ${u.logGroup.split('/').slice(-2).join('/')}: ${u.sample}`).join(' · '),
+            severity: 'medium',
+            source: 'PHI-in-logs scanner',
+            action: 'Review the offending log lines; redact PII at the source (logger or error handler) and rotate the 7-day log retention',
+          }).catch(() => {});
+        }
+
+        return {
+          ok: unique.length === 0,
+          message:
+            unique.length === 0
+              ? `Scanned ${scanned} log events across ${Math.min(groups.length, 30)} groups — no PHI patterns found`
+              : `${unique.length} possible PHI match(es) across ${new Set(unique.map((u) => u.logGroup)).size} log group(s)`,
+          data: {
+            totalGroups: groups.length,
+            scannedGroups: Math.min(groups.length, 30),
+            scannedEvents: scanned,
+            findings: unique.slice(0, 20),
+          },
+        };
+      } catch (err) {
+        return { ok: false, message: err instanceof Error ? err.message : 'Log scan failed' };
+      }
+    },
+  },
+  {
+    id: 'iam-hygiene',
+    group: 'monitoring',
+    schedule: 'cron(0 9 ? * MON *)',
+    description: 'Weekly IAM hygiene: alerts on (a) access keys older than 90d, (b) console-enabled users without MFA, (c) inactive keys (90d unused). Catches rotation drift.',
+    handler: async () => {
+      const accessKeyId = process.env.OPENHEART_AWS_ACCESS_KEY_ID || process.env.AWS_ACCESS_KEY_ID;
+      const secretAccessKey = process.env.OPENHEART_AWS_SECRET_ACCESS_KEY || process.env.AWS_SECRET_ACCESS_KEY;
+      if (!accessKeyId || !secretAccessKey) return { ok: false, message: 'AWS creds missing' };
+      try {
+        const {
+          IAMClient,
+          ListUsersCommand,
+          ListAccessKeysCommand,
+          GetAccessKeyLastUsedCommand,
+          GetLoginProfileCommand,
+          ListMFADevicesCommand,
+        } = await import('@aws-sdk/client-iam');
+        const iam = new IAMClient({
+          region: 'us-east-1',
+          credentials: { accessKeyId, secretAccessKey },
+        });
+
+        const KEY_AGE_DAYS = 90;
+        const INACTIVE_DAYS = 90;
+        const now = Date.now();
+
+        // Paginate ListUsers — typical accounts have <100, but be safe
+        const users: string[] = [];
+        let marker: string | undefined;
+        do {
+          const r = await iam.send(new ListUsersCommand({ Marker: marker }));
+          for (const u of r.Users || []) if (u.UserName) users.push(u.UserName);
+          marker = r.IsTruncated ? r.Marker : undefined;
+        } while (marker);
+
+        const oldKeys: { user: string; keyId: string; ageDays: number }[] = [];
+        const inactiveKeys: { user: string; keyId: string; lastUsedDays: number | null }[] = [];
+        const noMfa: { user: string }[] = [];
+
+        for (const user of users) {
+          // Console access? (LoginProfile exists if yes)
+          let hasConsole = false;
+          try {
+            await iam.send(new GetLoginProfileCommand({ UserName: user }));
+            hasConsole = true;
+          } catch {} // NoSuchEntity = no console password set
+
+          if (hasConsole) {
+            const mfa = await iam.send(new ListMFADevicesCommand({ UserName: user })).catch(() => ({ MFADevices: [] }));
+            if ((mfa.MFADevices || []).length === 0) noMfa.push({ user });
+          }
+
+          // Access keys
+          const keys = await iam.send(new ListAccessKeysCommand({ UserName: user })).catch(() => ({ AccessKeyMetadata: [] }));
+          for (const k of keys.AccessKeyMetadata || []) {
+            if (!k.AccessKeyId || k.Status !== 'Active') continue;
+            const ageDays = k.CreateDate ? Math.floor((now - k.CreateDate.getTime()) / 86400000) : 0;
+            if (ageDays > KEY_AGE_DAYS) {
+              oldKeys.push({ user, keyId: k.AccessKeyId, ageDays });
+            }
+            // Last-used
+            const lastUsed = await iam.send(new GetAccessKeyLastUsedCommand({ AccessKeyId: k.AccessKeyId })).catch(() => null);
+            const lastUsedDate = lastUsed?.AccessKeyLastUsed?.LastUsedDate;
+            const lastUsedDays = lastUsedDate
+              ? Math.floor((now - lastUsedDate.getTime()) / 86400000)
+              : null;
+            if (lastUsedDays !== null && lastUsedDays > INACTIVE_DAYS) {
+              inactiveKeys.push({ user, keyId: k.AccessKeyId, lastUsedDays });
+            }
+          }
+        }
+
+        const issues: string[] = [];
+        if (oldKeys.length) {
+          issues.push(`${oldKeys.length} key(s) > ${KEY_AGE_DAYS}d old: ${oldKeys.map((k) => `${k.user}(${k.ageDays}d)`).slice(0, 5).join(', ')}`);
+        }
+        if (inactiveKeys.length) {
+          issues.push(`${inactiveKeys.length} key(s) unused > ${INACTIVE_DAYS}d: ${inactiveKeys.map((k) => `${k.user}(${k.lastUsedDays}d)`).slice(0, 5).join(', ')}`);
+        }
+        if (noMfa.length) {
+          issues.push(`${noMfa.length} console user(s) WITHOUT MFA: ${noMfa.map((n) => n.user).join(', ')}`);
+        }
+
+        if (issues.length > 0) {
+          await dispatchAlert({
+            id: `iam-hygiene-${new Date().toISOString().slice(0, 10)}`,
+            type: noMfa.length > 0 ? 'error' : 'warning',
+            title: `IAM hygiene: ${issues.length} issue category(ies)`,
+            message: issues.join(' · '),
+            severity: noMfa.length > 0 ? 'high' : 'medium',
+            source: 'IAM hygiene cron',
+            action:
+              noMfa.length > 0
+                ? 'Enable MFA for console users IMMEDIATELY (IAM → Users → Security credentials)'
+                : 'Rotate old keys; deactivate unused keys (IAM → Users → Access keys)',
+          }).catch(() => {});
+        }
+
+        return {
+          ok: issues.length === 0,
+          message: issues.length === 0 ? `${users.length} users clean — keys < ${KEY_AGE_DAYS}d, MFA enabled, no stale keys` : issues.join(' · '),
+          data: { totalUsers: users.length, oldKeys, inactiveKeys, noMfa },
+        };
+      } catch (err) {
+        return { ok: false, message: err instanceof Error ? err.message : 'IAM scan failed' };
+      }
+    },
+  },
+  {
     id: 'tfn-verification-watch',
     group: 'monitoring',
     schedule: 'rate(2 hours)',

@@ -49,6 +49,9 @@ CRONS=(
   "integrity-monitor|cron(0 9 * * ? *)"
   "funnel-monitor|cron(0 12 * * ? *)"
   "tfn-verification-watch|rate(2 hours)"
+  "public-s3-scanner|cron(0 8 * * ? *)"
+  "phi-log-scanner|cron(0 7 ? * MON *)"
+  "iam-hygiene|cron(0 9 ? * MON *)"
 )
 
 run() {
