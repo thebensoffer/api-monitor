@@ -55,6 +55,13 @@ export interface CronDef {
   schedule: string;
   description: string;
   handler: (ctx: CronContext) => Promise<CronResult>;
+  /**
+   * ISO 8601 date when this cron was first installed. Used by cron-watchdog
+   * to suppress "never fired" alerts during the grace window for newly-
+   * installed crons. Optional — older crons omit it and watchdog treats
+   * them as long-standing.
+   */
+  addedAt?: string;
 }
 
 const TARGETS = [
@@ -848,6 +855,13 @@ export const CRON_REGISTRY: CronDef[] = [
         }
         if (!maxMin) continue;
         if (!c.lastRun) {
+          // Newly-installed cron: if `addedAt` is recent, skip. EventBridge's
+          // first fire is up to `rate` minutes after install, so without this
+          // grace we'd always alert on every new cron we ship.
+          if (c.addedAt) {
+            const ageSinceInstallMin = Math.floor((now - new Date(c.addedAt).getTime()) / 60000);
+            if (ageSinceInstallMin < maxMin * 2) continue; // install grace = 2x interval
+          }
           stale.push({ id: c.id, ageMin: -1, expectedMaxMin: maxMin });
           continue;
         }
@@ -968,6 +982,7 @@ export const CRON_REGISTRY: CronDef[] = [
   },
   {
     id: 'public-s3-scanner',
+    addedAt: '2026-04-21T00:00:00Z',
     group: 'monitoring',
     schedule: 'cron(0 8 * * ? *)',
     description: 'Daily scan of every S3 bucket in the account for public ACLs, public bucket policies, or missing PublicAccessBlock. Intentionally-public buckets can be allowlisted via OPENHEART_S3_PUBLIC_ALLOWLIST env var.',
@@ -1106,6 +1121,7 @@ export const CRON_REGISTRY: CronDef[] = [
   },
   {
     id: 'phi-log-scanner',
+    addedAt: '2026-04-21T00:00:00Z',
     group: 'monitoring',
     schedule: 'cron(0 7 ? * MON *)',
     description: 'Weekly sweep of CloudWatch log groups for accidental PHI leakage (emails, US phone numbers) in error stacks. HIPAA: PHI in logs = breach risk.',
@@ -1227,6 +1243,7 @@ export const CRON_REGISTRY: CronDef[] = [
   },
   {
     id: 'iam-hygiene',
+    addedAt: '2026-04-21T00:00:00Z',
     group: 'monitoring',
     schedule: 'cron(0 9 ? * MON *)',
     description: 'Weekly IAM hygiene: alerts on (a) access keys older than 90d, (b) console-enabled users without MFA, (c) inactive keys (90d unused). Catches rotation drift.',
@@ -1336,6 +1353,7 @@ export const CRON_REGISTRY: CronDef[] = [
   },
   {
     id: 'vendor-status-monitor',
+    addedAt: '2026-04-21T00:00:00Z',
     group: 'monitoring',
     schedule: 'rate(15 minutes)',
     description: 'Polls public StatusPage feeds for every critical vendor (Stripe, Twilio, SES, Anthropic, Sentry, OpenAI, Neon, Healthie) and alerts on any minor/major/critical incident. Catches "site is fine, vendor is degraded" before patients call.',
@@ -1406,6 +1424,7 @@ export const CRON_REGISTRY: CronDef[] = [
   },
   {
     id: 'secret-leak-scan',
+    addedAt: '2026-04-21T00:00:00Z',
     group: 'monitoring',
     schedule: 'rate(1 hour)',
     description: 'Scans the most recent commits across all watched GitHub repos for high-confidence secret patterns (AWS keys, Stripe live keys, Twilio auth tokens, GitHub PATs, private keys). Supplementary layer on top of GitHub Push Protection.',
@@ -1521,6 +1540,7 @@ export const CRON_REGISTRY: CronDef[] = [
   },
   {
     id: 'stripe-dispute-watcher',
+    addedAt: '2026-04-21T00:00:00Z',
     group: 'monitoring',
     schedule: 'rate(1 hour)',
     description: 'Hourly check of Stripe disputes + Radar early-fraud-warnings for DK/Tovani. Alerts on new disputes, impending evidence deadlines (<72h), and any early-fraud-warning (pre-dispute, lets you refund before chargeback hits).',
@@ -1630,6 +1650,7 @@ export const CRON_REGISTRY: CronDef[] = [
   },
   {
     id: 'tfn-verification-watch',
+    addedAt: '2026-04-21T00:00:00Z',
     group: 'monitoring',
     schedule: 'rate(2 hours)',
     description: 'Polls Twilio toll-free verification status for +18449950807 (SID HHbfd8b714630de93cebf2a473ade35a58). Alerts the moment it transitions out of IN_REVIEW so SMS can resume immediately on approval.',
@@ -1660,9 +1681,73 @@ export const CRON_REGISTRY: CronDef[] = [
         const lastStatus = prior[0]?.data?.status as string | undefined;
         const changed = lastStatus && lastStatus !== status;
 
+        // Auto-cleanup: when TFN flips to APPROVED, the consent-screenshot
+        // bucket we created for verification has served its purpose. Delete
+        // it to shrink the public-S3-scanner alert list by one item and
+        // stop paying for an unused bucket.
+        let tfnProofCleanup: { deleted: boolean; objectsDeleted: number; error?: string } | null = null;
+        const isApproved = status === 'TWILIO_APPROVED';
+
+        if (changed && isApproved) {
+          const proofBucket =
+            process.env.TFN_PROOF_BUCKET || 'dk-twilio-tfn-proof-1776741718';
+          try {
+            const accessKeyId =
+              process.env.OPENHEART_AWS_ACCESS_KEY_ID || process.env.AWS_ACCESS_KEY_ID;
+            const secretAccessKey =
+              process.env.OPENHEART_AWS_SECRET_ACCESS_KEY || process.env.AWS_SECRET_ACCESS_KEY;
+            if (!accessKeyId || !secretAccessKey) throw new Error('AWS creds missing');
+            const {
+              S3Client,
+              ListObjectsV2Command,
+              DeleteObjectsCommand,
+              DeleteBucketCommand,
+            } = await import('@aws-sdk/client-s3');
+            const s3 = new S3Client({
+              region: process.env.OPENHEART_AWS_REGION || 'us-east-1',
+              credentials: { accessKeyId, secretAccessKey },
+            });
+            // Safety: only proceed if bucket has <10 objects (sanity check — we expect 1)
+            const list = await s3.send(
+              new ListObjectsV2Command({ Bucket: proofBucket, MaxKeys: 10 })
+            );
+            const objs = list.Contents || [];
+            if (objs.length >= 10) {
+              throw new Error(
+                `Bucket has ${objs.length}+ objects — refusing to delete. Expected ≤1 (the single consent screenshot).`
+              );
+            }
+            if (objs.length > 0) {
+              await s3.send(
+                new DeleteObjectsCommand({
+                  Bucket: proofBucket,
+                  Delete: {
+                    Objects: objs.map((o) => ({ Key: o.Key! })),
+                    Quiet: true,
+                  },
+                })
+              );
+            }
+            await s3.send(new DeleteBucketCommand({ Bucket: proofBucket }));
+            tfnProofCleanup = { deleted: true, objectsDeleted: objs.length };
+            console.log(`[tfn-verification-watch] deleted bucket ${proofBucket} (${objs.length} objects)`);
+          } catch (err: any) {
+            tfnProofCleanup = {
+              deleted: false,
+              objectsDeleted: 0,
+              error: err?.message || 'bucket cleanup failed',
+            };
+            console.warn(`[tfn-verification-watch] cleanup failed:`, err?.message);
+          }
+        }
+
         if (changed) {
-          const isApproved = status === 'TWILIO_APPROVED';
           const isRejected = status === 'TWILIO_REJECTED';
+          const cleanupSuffix = tfnProofCleanup?.deleted
+            ? ` · TFN-proof bucket auto-deleted (${tfnProofCleanup.objectsDeleted} obj).`
+            : tfnProofCleanup?.error
+            ? ` · Proof-bucket cleanup skipped: ${tfnProofCleanup.error}`
+            : '';
           await dispatchAlert({
             id: `tfn-status-change-${verificationSid}-${status}`,
             type: isRejected ? 'error' : isApproved ? 'info' : 'warning',
@@ -1672,7 +1757,7 @@ export const CRON_REGISTRY: CronDef[] = [
               ? `⛔ Toll-free verification REJECTED`
               : `Toll-free verification status: ${lastStatus} → ${status}`,
             message: isApproved
-              ? `Twilio approved the TFN. DK + Tovani SMS will start working as soon as the latest builds (already in flight) deploy. No code changes needed.`
+              ? `Twilio approved the TFN. DK + Tovani SMS will start working as soon as the latest builds (already in flight) deploy. No code changes needed.${cleanupSuffix}`
               : isRejected
               ? `Reason: ${rejectReason || 'not provided'}. Reply on the verification record or resubmit. Until then, SMS remains down.`
               : `Verification moved from ${lastStatus} to ${status}. ${editReason}`,
@@ -1688,7 +1773,7 @@ export const CRON_REGISTRY: CronDef[] = [
 
         return {
           ok: true,
-          message: `Status: ${status}${changed ? ` (was ${lastStatus})` : ''}${rejectReason ? ` · ${rejectReason}` : ''}`,
+          message: `Status: ${status}${changed ? ` (was ${lastStatus})` : ''}${rejectReason ? ` · ${rejectReason}` : ''}${tfnProofCleanup?.deleted ? ` · proof bucket deleted` : ''}`,
           data: {
             status,
             verificationSid,
@@ -1698,6 +1783,7 @@ export const CRON_REGISTRY: CronDef[] = [
             rejectionReason: rejectReason || null,
             lastStatus: lastStatus || null,
             changed: !!changed,
+            tfnProofCleanup,
           },
         };
       } catch (err) {

@@ -21,6 +21,7 @@ export async function GET(req: NextRequest) {
       group: c.group,
       schedule: c.schedule,
       description: c.description,
+      addedAt: c.addedAt ?? null,
       lastRun: latest[c.id] ?? null,
       history: await getRuns(c.id),
     }))
