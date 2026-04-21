@@ -22,6 +22,7 @@ frontend:
                        NOTIFY_TWILIO_ACCOUNT_SID NOTIFY_TWILIO_AUTH_TOKEN NOTIFY_TWILIO_FROM NOTIFY_SMS_TO \
                        NOTIFY_SLACK_WEBHOOK \
                        TWILIO_ACCOUNT_SID TWILIO_AUTH_TOKEN TWILIO_TFN_VERIFICATION_SID \
+                       GITHUB_TOKEN OPENHEART_GITHUB_REPOS OPENHEART_S3_PUBLIC_ALLOWLIST \
                        ANTHROPIC_API_KEY FIX_TOKEN_SECRET OPENHEART_AUTOPILOT; do
               if [ -n "${!var}" ]; then echo "${var}=${!var}"; fi
             done

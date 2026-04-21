@@ -52,6 +52,9 @@ CRONS=(
   "public-s3-scanner|cron(0 8 * * ? *)"
   "phi-log-scanner|cron(0 7 ? * MON *)"
   "iam-hygiene|cron(0 9 ? * MON *)"
+  "vendor-status-monitor|rate(15 minutes)"
+  "secret-leak-scan|rate(1 hour)"
+  "stripe-dispute-watcher|rate(1 hour)"
 )
 
 run() {

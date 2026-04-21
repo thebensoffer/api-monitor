@@ -970,8 +970,29 @@ export const CRON_REGISTRY: CronDef[] = [
     id: 'public-s3-scanner',
     group: 'monitoring',
     schedule: 'cron(0 8 * * ? *)',
-    description: 'Daily scan of every S3 bucket in the account for public ACLs, public bucket policies, or missing PublicAccessBlock. Critical for HIPAA — already prevented one accidental exposure (dk-blog-static).',
+    description: 'Daily scan of every S3 bucket in the account for public ACLs, public bucket policies, or missing PublicAccessBlock. Intentionally-public buckets can be allowlisted via OPENHEART_S3_PUBLIC_ALLOWLIST env var.',
     handler: async () => {
+      // Buckets whose public policy is intentional (static websites, public
+      // brand assets). Override via env var OPENHEART_S3_PUBLIC_ALLOWLIST
+      // (comma-separated). These buckets still get scanned and reported in
+      // `data`, but don't escalate to a HIGH alert.
+      const DEFAULT_ALLOWLIST = [
+        'camp-eggcellent-2026-1769786675',
+        'dk-blog-static-1775320611',
+        'salutele.com',
+        'subek-org-static',
+        'subek.org',
+        'theglassguys-xyz-site',
+        'social-media-agent-images',
+        // beyondthederech-uploads is Instagram-style (profile photos + stories,
+        // policy already scoped to those prefixes) — allowlisted as intentional.
+        'beyondthederech-uploads',
+      ];
+      const envList = (process.env.OPENHEART_S3_PUBLIC_ALLOWLIST || '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const allowlist = new Set(envList.length > 0 ? envList : DEFAULT_ALLOWLIST);
       const accessKeyId = process.env.OPENHEART_AWS_ACCESS_KEY_ID || process.env.AWS_ACCESS_KEY_ID;
       const secretAccessKey = process.env.OPENHEART_AWS_SECRET_ACCESS_KEY || process.env.AWS_SECRET_ACCESS_KEY;
       if (!accessKeyId || !secretAccessKey) return { ok: false, message: 'AWS creds missing' };
@@ -1046,26 +1067,37 @@ export const CRON_REGISTRY: CronDef[] = [
           }
         }
 
-        const exposed = findings.filter((f) => f.severity === 'high');
-        if (exposed.length > 0) {
+        // Separate exposed findings into "unexpected" (alert) and "allowlisted" (report only)
+        const exposedAll = findings.filter((f) => f.severity === 'high');
+        const exposedUnexpected = exposedAll.filter((f) => !allowlist.has(f.bucket));
+        const exposedAllowlisted = exposedAll.filter((f) => allowlist.has(f.bucket));
+
+        if (exposedUnexpected.length > 0) {
           await dispatchAlert({
-            id: `s3-public-${exposed.map((e) => e.bucket).sort().join(',')}`,
+            id: `s3-public-${exposedUnexpected.map((e) => e.bucket).sort().join(',')}`,
             type: 'error',
-            title: `🚨 ${exposed.length} S3 bucket(s) publicly accessible`,
-            message: exposed.map((e) => `${e.bucket}: ${e.reasons.join('; ')}`).join(' · '),
+            title: `🚨 ${exposedUnexpected.length} S3 bucket(s) publicly accessible (not allowlisted)`,
+            message: exposedUnexpected.map((e) => `${e.bucket}: ${e.reasons.join('; ')}`).join(' · '),
             severity: 'high',
             source: 'S3 public-bucket scanner',
-            action: 'Open S3 console → Permissions → enable Block Public Access OR audit ACL/policy',
+            action: 'Open S3 console → Permissions → enable Block Public Access OR audit ACL/policy. If intentional, add to OPENHEART_S3_PUBLIC_ALLOWLIST env var.',
           }).catch(() => {});
         }
 
         return {
-          ok: exposed.length === 0,
+          ok: exposedUnexpected.length === 0,
           message:
-            exposed.length === 0
-              ? `Scanned ${slice.length} buckets — none publicly exposed${findings.length ? ` (${findings.length} have weak PAB but no public grant)` : ''}`
-              : `${exposed.length} bucket(s) PUBLIC: ${exposed.map((e) => e.bucket).join(', ')}`,
-          data: { totalBuckets: buckets.Buckets?.length ?? 0, scanned: slice.length, findings },
+            exposedUnexpected.length === 0
+              ? `Scanned ${slice.length} buckets — none unexpectedly public${exposedAllowlisted.length ? ` (${exposedAllowlisted.length} allowlisted as intentional)` : ''}${findings.length - exposedAll.length > 0 ? ` · ${findings.length - exposedAll.length} have weak PAB only` : ''}`
+              : `${exposedUnexpected.length} bucket(s) UNEXPECTEDLY PUBLIC: ${exposedUnexpected.map((e) => e.bucket).join(', ')}`,
+          data: {
+            totalBuckets: buckets.Buckets?.length ?? 0,
+            scanned: slice.length,
+            findings,
+            allowlisted: Array.from(allowlist),
+            exposedUnexpected: exposedUnexpected.map((e) => e.bucket),
+            exposedAllowlisted: exposedAllowlisted.map((e) => e.bucket),
+          },
         };
       } catch (err) {
         return { ok: false, message: err instanceof Error ? err.message : 'S3 scan failed' };
@@ -1299,6 +1331,300 @@ export const CRON_REGISTRY: CronDef[] = [
         };
       } catch (err) {
         return { ok: false, message: err instanceof Error ? err.message : 'IAM scan failed' };
+      }
+    },
+  },
+  {
+    id: 'vendor-status-monitor',
+    group: 'monitoring',
+    schedule: 'rate(15 minutes)',
+    description: 'Polls public StatusPage feeds for every critical vendor (Stripe, Twilio, SES, Anthropic, Sentry, OpenAI, Neon, Healthie) and alerts on any minor/major/critical incident. Catches "site is fine, vendor is degraded" before patients call.',
+    handler: async () => {
+      // Atlassian StatusPage endpoints — all return identical JSON shape with
+      // status.indicator ∈ {none, minor, major, critical, maintenance}
+      const VENDORS = [
+        { key: 'stripe', url: 'https://www.stripestatus.com/api/v2/summary.json' },
+        { key: 'twilio', url: 'https://status.twilio.com/api/v2/summary.json' },
+        { key: 'anthropic', url: 'https://status.anthropic.com/api/v2/summary.json' },
+        { key: 'sentry', url: 'https://status.sentry.io/api/v2/summary.json' },
+        { key: 'openai', url: 'https://status.openai.com/api/v2/summary.json' },
+        { key: 'neon', url: 'https://neonstatus.com/api/v2/summary.json' },
+        { key: 'github', url: 'https://www.githubstatus.com/api/v2/summary.json' },
+        { key: 'amplify', url: 'https://status.aws.amazon.com/healthcheck.json' }, // AWS doesn't use StatusPage; skip gracefully
+      ];
+
+      const results = await Promise.all(VENDORS.map(async (v) => {
+        try {
+          const r = await fetch(v.url, { signal: AbortSignal.timeout(6000) });
+          if (!r.ok) return { vendor: v.key, status: 'unknown', indicator: 'unknown', description: `HTTP ${r.status}` };
+          const j: any = await r.json();
+          // StatusPage summary shape: { status: { indicator, description }, incidents: [...] }
+          const indicator = j.status?.indicator || 'unknown';
+          const description = j.status?.description || '';
+          const openIncidents = (j.incidents || []).filter((i: any) => i.status !== 'resolved' && i.status !== 'completed');
+          return {
+            vendor: v.key,
+            indicator,
+            description,
+            openIncidents: openIncidents.length,
+            incidentNames: openIncidents.slice(0, 3).map((i: any) => i.name),
+          };
+        } catch (err: any) {
+          // Network error, timeout, or non-JSON response (e.g. AWS endpoint)
+          return { vendor: v.key, indicator: 'unreachable', description: err?.message?.slice(0, 100) || 'fetch failed' };
+        }
+      }));
+
+      // Alert on anything not "none" (skip unreachable — those are likely schema mismatches, not real outages)
+      const degraded = results.filter((r) => r.indicator !== 'none' && r.indicator !== 'unreachable' && r.indicator !== 'unknown');
+      if (degraded.length > 0) {
+        // Classify severity: critical > major > minor > maintenance
+        const worst = degraded.reduce((w, r) => {
+          const rank = { critical: 4, major: 3, minor: 2, maintenance: 1 } as any;
+          return (rank[r.indicator] || 0) > (rank[w.indicator] || 0) ? r : w;
+        });
+        await dispatchAlert({
+          id: `vendor-degraded-${degraded.map((d) => d.vendor).sort().join(',')}`,
+          type: worst.indicator === 'critical' || worst.indicator === 'major' ? 'error' : 'warning',
+          title: `${degraded.length} vendor(s) degraded — worst: ${worst.vendor} (${worst.indicator})`,
+          message: degraded.map((d) => `${d.vendor}: ${d.indicator}${(d as any).incidentNames?.length ? ` — ${(d as any).incidentNames[0]}` : ` (${d.description})`}`).join(' · '),
+          severity: worst.indicator === 'critical' || worst.indicator === 'major' ? 'high' : 'medium',
+          source: 'Vendor status monitor',
+          action: `Visit each vendor's status page; if critical vendor is down, prepare patient comms`,
+        }).catch(() => {});
+      }
+
+      const okCount = results.filter((r) => r.indicator === 'none').length;
+      return {
+        ok: degraded.length === 0,
+        message: degraded.length === 0
+          ? `All ${okCount}/${results.length} reachable vendors operational`
+          : `${degraded.length} degraded: ${degraded.map((d) => `${d.vendor}(${d.indicator})`).join(', ')}`,
+        data: { results, degradedCount: degraded.length },
+      };
+    },
+  },
+  {
+    id: 'secret-leak-scan',
+    group: 'monitoring',
+    schedule: 'rate(1 hour)',
+    description: 'Scans the most recent commits across all watched GitHub repos for high-confidence secret patterns (AWS keys, Stripe live keys, Twilio auth tokens, GitHub PATs, private keys). Supplementary layer on top of GitHub Push Protection.',
+    handler: async () => {
+      const token = process.env.GITHUB_TOKEN;
+      if (!token) {
+        return { ok: false, message: 'GITHUB_TOKEN not set — secret scan skipped' };
+      }
+      // Repos to scan — override with env var (comma-separated owner/repo)
+      const DEFAULT_REPOS = [
+        'thebensoffer/api-monitor',
+        'thebensoffer/discreet-ketamine',
+        'thebensoffer/tovanihealth',
+        'thebensoffer/drbensoffer-platform',
+      ];
+      const reposEnv = (process.env.OPENHEART_GITHUB_REPOS || '')
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const repos = reposEnv.length > 0 ? reposEnv : DEFAULT_REPOS;
+
+      // High-signal patterns. Each has a name + regex + severity.
+      // Kept narrow to avoid false positives — this is a tripwire, not a linter.
+      const PATTERNS: { name: string; re: RegExp; severity: 'high' | 'medium' }[] = [
+        { name: 'AWS Access Key', re: /\bAKIA[0-9A-Z]{16}\b/, severity: 'high' },
+        { name: 'AWS Secret Key', re: /aws_secret_access_key\s*[=:]\s*['"]?[A-Za-z0-9\/+=]{40}['"]?/i, severity: 'high' },
+        { name: 'Stripe Live Key', re: /\b(sk|rk)_live_[A-Za-z0-9]{20,}\b/, severity: 'high' },
+        { name: 'Stripe Live Publishable', re: /\bpk_live_[A-Za-z0-9]{20,}\b/, severity: 'medium' },
+        { name: 'Twilio Auth Token', re: /TWILIO_AUTH_TOKEN\s*[=:]\s*['"]?[a-f0-9]{32}['"]?/i, severity: 'high' },
+        { name: 'GitHub PAT', re: /\bghp_[A-Za-z0-9]{36}\b/, severity: 'high' },
+        { name: 'GitHub PAT (new)', re: /\bgithub_pat_[A-Za-z0-9_]{70,}\b/, severity: 'high' },
+        { name: 'Private Key Block', re: /-----BEGIN (RSA |EC |DSA |OPENSSH |)PRIVATE KEY-----/, severity: 'high' },
+        { name: 'Sentry Auth Token', re: /\bsntrys_[a-zA-Z0-9]{80,}\b/, severity: 'medium' },
+        { name: 'Anthropic API Key', re: /\bsk-ant-api\d{2}-[A-Za-z0-9_-]{80,}\b/, severity: 'high' },
+        { name: 'OpenAI API Key', re: /\bsk-(proj-)?[A-Za-z0-9_-]{40,}\b/, severity: 'medium' },
+      ];
+
+      const sinceIso = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(); // look back 2h (rate=1h + 1h slack)
+      const headers = {
+        Authorization: `Bearer ${token}`,
+        'Accept': 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        'User-Agent': 'openheart-secret-scan',
+      };
+
+      const findings: { repo: string; sha: string; file: string; pattern: string; severity: 'high' | 'medium' }[] = [];
+      const scannedCommits: { repo: string; count: number }[] = [];
+
+      for (const repo of repos) {
+        try {
+          const commitsRes = await fetch(
+            `https://api.github.com/repos/${repo}/commits?since=${encodeURIComponent(sinceIso)}&per_page=20`,
+            { headers, signal: AbortSignal.timeout(8000) }
+          );
+          if (!commitsRes.ok) {
+            console.warn(`[secret-leak-scan] ${repo}: commits list ${commitsRes.status}`);
+            continue;
+          }
+          const commits: any[] = await commitsRes.json();
+          scannedCommits.push({ repo, count: commits.length });
+
+          for (const c of commits) {
+            const sha = c.sha;
+            // Fetch per-commit diff
+            const detailRes = await fetch(
+              `https://api.github.com/repos/${repo}/commits/${sha}`,
+              { headers, signal: AbortSignal.timeout(8000) }
+            );
+            if (!detailRes.ok) continue;
+            const detail: any = await detailRes.json();
+            for (const f of detail.files || []) {
+              const patch = f.patch || '';
+              // Only scan added lines (prefix +) to skip context lines
+              const addedLines = patch
+                .split('\n')
+                .filter((l: string) => l.startsWith('+') && !l.startsWith('+++'))
+                .join('\n');
+              for (const p of PATTERNS) {
+                if (p.re.test(addedLines)) {
+                  findings.push({ repo, sha: sha.slice(0, 7), file: f.filename, pattern: p.name, severity: p.severity });
+                }
+              }
+            }
+          }
+        } catch (err: any) {
+          console.warn(`[secret-leak-scan] ${repo}:`, err?.message);
+        }
+      }
+
+      if (findings.length > 0) {
+        const high = findings.filter((f) => f.severity === 'high');
+        await dispatchAlert({
+          id: `secret-leak-${findings.map((f) => `${f.repo}@${f.sha}`).sort().slice(0, 5).join(',')}`,
+          type: 'error',
+          title: `🔒 ${findings.length} potential secret leak(s) in recent commits (${high.length} high)`,
+          message: findings.slice(0, 8).map((f) => `[${f.severity}] ${f.repo}@${f.sha} ${f.file}: ${f.pattern}`).join(' · '),
+          severity: high.length > 0 ? 'high' : 'medium',
+          source: 'Secret-leak scan',
+          action: 'ROTATE the leaked credential immediately. Then purge from git history (git-filter-repo or BFG). Push-protection may have missed a partial match.',
+        }).catch(() => {});
+      }
+
+      const totalCommits = scannedCommits.reduce((s, r) => s + r.count, 0);
+      return {
+        ok: findings.length === 0,
+        message:
+          findings.length === 0
+            ? `Scanned ${totalCommits} commit(s) across ${repos.length} repo(s) — no secret patterns matched`
+            : `${findings.length} match(es) across ${new Set(findings.map((f) => f.repo)).size} repo(s)`,
+        data: { scannedCommits, findings: findings.slice(0, 20), repos },
+      };
+    },
+  },
+  {
+    id: 'stripe-dispute-watcher',
+    group: 'monitoring',
+    schedule: 'rate(1 hour)',
+    description: 'Hourly check of Stripe disputes + Radar early-fraud-warnings for DK/Tovani. Alerts on new disputes, impending evidence deadlines (<72h), and any early-fraud-warning (pre-dispute, lets you refund before chargeback hits).',
+    handler: async () => {
+      // DK and Tovani share the same Stripe account; hitting DK's endpoint
+      // returns disputes across both businesses' charges.
+      const DK_BASE = 'https://discreetketamine.com';
+      const key = process.env.DK_API_KEY || process.env.DK_KHAI_API_KEY || process.env.KHAI_API_KEY;
+      if (!key) return { ok: false, message: 'DK_API_KEY missing — same key OpenHeart uses for /api/khai/payments' };
+
+      try {
+        const r = await fetch(`${DK_BASE}/api/khai/disputes?days=90`, {
+          headers: { 'x-khai-api-key': key },
+          signal: AbortSignal.timeout(15000),
+        });
+        if (!r.ok) return { ok: false, message: `DK disputes API returned ${r.status}` };
+        const j: any = await r.json();
+        const disputes = (j.disputes || []) as any[];
+        const efw = (j.earlyFraudWarnings || []) as any[];
+
+        const now = Date.now();
+        const urgentThresholdMs = 72 * 60 * 60 * 1000; // evidence due within 72h = urgent
+        const openNeedsResponse = disputes.filter((d) =>
+          d.status === 'needs_response' || d.status === 'warning_needs_response'
+        );
+        const urgent = openNeedsResponse.filter((d) => {
+          if (!d.evidenceDueBy) return false;
+          const ms = new Date(d.evidenceDueBy).getTime() - now;
+          return ms > 0 && ms < urgentThresholdMs;
+        });
+        const actionableEfw = efw.filter((e) => e.actionable);
+
+        // Dedup by looking at prior runs — only alert on disputes we haven't
+        // already alerted on. Stored as data.alertedIds in cron-history.
+        const priorRuns = await getRuns('stripe-dispute-watcher').catch(() => []);
+        const alreadyAlertedIds = new Set<string>();
+        for (const run of priorRuns.slice(0, 5)) {
+          const prev: string[] = run.data?.alertedIds ?? [];
+          for (const id of prev) alreadyAlertedIds.add(id);
+        }
+
+        const newDisputes = openNeedsResponse.filter((d) => !alreadyAlertedIds.has(d.id));
+        const newEfw = actionableEfw.filter((e) => !alreadyAlertedIds.has(e.id));
+
+        // Alert 1: new disputes needing response
+        if (newDisputes.length > 0) {
+          await dispatchAlert({
+            id: `dispute-new-${newDisputes.map((d) => d.id).sort().join(',')}`,
+            type: 'error',
+            title: `💳 ${newDisputes.length} new Stripe dispute(s) need response`,
+            message: newDisputes.slice(0, 5).map((d) => `$${(d.amount / 100).toFixed(2)} ${d.reason} — evidence due ${d.evidenceDueBy?.slice(0, 10) || '?'} [${d.state}]`).join(' · '),
+            severity: 'high',
+            source: 'Stripe dispute watcher',
+            action: 'Open Payments tab → submit evidence before the deadline. Default to auto-losing if ignored.',
+          }).catch(() => {});
+        }
+
+        // Alert 2: any dispute with <72h to evidence deadline
+        if (urgent.length > 0) {
+          await dispatchAlert({
+            id: `dispute-urgent-${new Date().toISOString().slice(0, 10)}`,
+            type: 'error',
+            title: `⏰ ${urgent.length} dispute(s) < 72h to evidence deadline`,
+            message: urgent.map((d) => `$${(d.amount / 100).toFixed(2)} ${d.id} due ${d.evidenceDueBy}`).join(' · '),
+            severity: 'high',
+            source: 'Stripe dispute watcher',
+            action: 'Submit evidence in Stripe Dashboard NOW — missed deadline = automatic loss.',
+          }).catch(() => {});
+        }
+
+        // Alert 3: early fraud warnings (pre-dispute, proactive refund saves $15 + dispute ratio)
+        if (newEfw.length > 0) {
+          await dispatchAlert({
+            id: `efw-${newEfw.map((e) => e.id).sort().join(',')}`,
+            type: 'warning',
+            title: `⚠ ${newEfw.length} new early-fraud-warning(s) — refund to avoid dispute`,
+            message: newEfw.slice(0, 5).map((e) => `${e.id} · ${e.fraudType} · charge ${e.chargeId} [${e.state}]`).join(' · '),
+            severity: 'medium',
+            source: 'Stripe dispute watcher',
+            action: 'Issue a refund on the flagged charge — prevents dispute from being filed, saves $15 fee + protects dispute ratio.',
+          }).catch(() => {});
+        }
+
+        const alertedIds = [
+          ...newDisputes.map((d) => d.id),
+          ...newEfw.map((e) => e.id),
+        ];
+
+        return {
+          ok: newDisputes.length === 0 && urgent.length === 0 && newEfw.length === 0,
+          message: `${disputes.length} dispute(s) (${openNeedsResponse.length} open) · ${efw.length} EFW(s) · ${newDisputes.length} new disputes, ${newEfw.length} new EFWs`,
+          data: {
+            totalDisputes: disputes.length,
+            openDisputes: openNeedsResponse.length,
+            urgentDisputes: urgent.length,
+            totalEfw: efw.length,
+            actionableEfw: actionableEfw.length,
+            newDisputes: newDisputes.map((d) => ({ id: d.id, amount: d.amount, reason: d.reason, evidenceDueBy: d.evidenceDueBy })),
+            newEfw: newEfw.map((e) => ({ id: e.id, fraudType: e.fraudType })),
+            alertedIds,
+          },
+        };
+      } catch (err) {
+        return { ok: false, message: err instanceof Error ? err.message : 'Dispute check failed' };
       }
     },
   },
