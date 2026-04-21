@@ -41,6 +41,14 @@ CRONS=(
   "morning-briefing|cron(0 12 * * ? *)"
   "evening-report|cron(0 23 * * ? *)"
   "gsc-snapshot|cron(0 11 ? * MON *)"
+  "synthetic-journey|rate(1 hour)"
+  "cron-watchdog|rate(1 hour)"
+  "aws-cost-monitor|cron(0 13 * * ? *)"
+  "failed-payment-watchdog|rate(15 minutes)"
+  "sender-reputation|cron(0 14 * * ? *)"
+  "integrity-monitor|cron(0 9 * * ? *)"
+  "funnel-monitor|cron(0 12 * * ? *)"
+  "tfn-verification-watch|rate(2 hours)"
 )
 
 run() {

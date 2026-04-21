@@ -18,6 +18,7 @@ import { probe } from './probe';
 import tls from 'node:tls';
 import { dispatchAlert } from './notify';
 import { getAllLatest as getAllSyntheticLatest } from './synthetic';
+import { getRuns } from './cron-history';
 
 // Self-fetch base URL — defaults to deployed Amplify URL on prod, localhost on dev.
 function selfBase(): string {
@@ -963,6 +964,83 @@ export const CRON_REGISTRY: CronDef[] = [
         message: failures.length === 0 ? 'No payment failures in last hour' : `${failures.length} failure(s) in last hour`,
         data: { failureCount: failures.length, recentFailures: failures.slice(0, 5).map((f: any) => ({ id: f.id, amount: f.amount, site: f._site })) },
       };
+    },
+  },
+  {
+    id: 'tfn-verification-watch',
+    group: 'monitoring',
+    schedule: 'rate(2 hours)',
+    description: 'Polls Twilio toll-free verification status for +18449950807 (SID HHbfd8b714630de93cebf2a473ade35a58). Alerts the moment it transitions out of IN_REVIEW so SMS can resume immediately on approval.',
+    handler: async () => {
+      const sid = process.env.TWILIO_ACCOUNT_SID || process.env.NOTIFY_TWILIO_ACCOUNT_SID;
+      const token = process.env.TWILIO_AUTH_TOKEN || process.env.NOTIFY_TWILIO_AUTH_TOKEN;
+      const verificationSid = process.env.TWILIO_TFN_VERIFICATION_SID || 'HHbfd8b714630de93cebf2a473ade35a58';
+      if (!sid || !token) {
+        return { ok: false, message: 'TWILIO_ACCOUNT_SID/AUTH_TOKEN not set' };
+      }
+      try {
+        const auth = Buffer.from(`${sid}:${token}`).toString('base64');
+        const r = await fetch(
+          `https://messaging.twilio.com/v1/Tollfree/Verifications/${verificationSid}`,
+          { headers: { Authorization: `Basic ${auth}` }, signal: AbortSignal.timeout(8000) }
+        );
+        if (!r.ok) {
+          const body = await r.text().catch(() => '');
+          return { ok: false, message: `Twilio API ${r.status}: ${body.slice(0, 200)}` };
+        }
+        const j: any = await r.json();
+        const status = j.status as string; // PENDING_REVIEW | IN_REVIEW | TWILIO_APPROVED | TWILIO_REJECTED
+        const editReason = j.edit_expires_at ? `editExpires=${j.edit_expires_at}` : '';
+        const rejectReason = j.rejection_reason || '';
+
+        // Compare to the previous run's status (cron-history is DDB-backed).
+        const prior = await getRuns('tfn-verification-watch').catch(() => []);
+        const lastStatus = prior[0]?.data?.status as string | undefined;
+        const changed = lastStatus && lastStatus !== status;
+
+        if (changed) {
+          const isApproved = status === 'TWILIO_APPROVED';
+          const isRejected = status === 'TWILIO_REJECTED';
+          await dispatchAlert({
+            id: `tfn-status-change-${verificationSid}-${status}`,
+            type: isRejected ? 'error' : isApproved ? 'info' : 'warning',
+            title: isApproved
+              ? `🎉 Toll-free +18449950807 APPROVED — SMS unblocked`
+              : isRejected
+              ? `⛔ Toll-free verification REJECTED`
+              : `Toll-free verification status: ${lastStatus} → ${status}`,
+            message: isApproved
+              ? `Twilio approved the TFN. DK + Tovani SMS will start working as soon as the latest builds (already in flight) deploy. No code changes needed.`
+              : isRejected
+              ? `Reason: ${rejectReason || 'not provided'}. Reply on the verification record or resubmit. Until then, SMS remains down.`
+              : `Verification moved from ${lastStatus} to ${status}. ${editReason}`,
+            severity: isRejected ? 'high' : isApproved ? 'low' : 'medium',
+            source: 'TFN verification watch',
+            action: isApproved
+              ? 'Send a test SMS from DK or Tovani to confirm delivery'
+              : isRejected
+              ? 'Open Twilio console → Messaging → Toll-Free Verifications, fix issues and resubmit'
+              : 'Check Twilio console for updates',
+          }).catch(() => {});
+        }
+
+        return {
+          ok: true,
+          message: `Status: ${status}${changed ? ` (was ${lastStatus})` : ''}${rejectReason ? ` · ${rejectReason}` : ''}`,
+          data: {
+            status,
+            verificationSid,
+            phoneNumberSid: j.tollfree_phone_number_sid,
+            businessName: j.business_name,
+            useCaseCategories: j.use_case_categories,
+            rejectionReason: rejectReason || null,
+            lastStatus: lastStatus || null,
+            changed: !!changed,
+          },
+        };
+      } catch (err) {
+        return { ok: false, message: err instanceof Error ? err.message : 'TFN check failed' };
+      }
     },
   },
 ];
