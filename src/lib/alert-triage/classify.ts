@@ -71,6 +71,14 @@ function buildPrompt(msg: InboundMessage): string {
 }
 
 export async function classifyAlert(msg: InboundMessage): Promise<Classification> {
+  // Pre-classify check: if this is a CloudWatch alarm email AND the alarm
+  // has since recovered to OK, short-circuit to a "routine — already
+  // recovered" classification. Saves a Bedrock call AND prevents the
+  // common false-positive where the agent suggests restart-amplify-app
+  // for an alarm that healed itself before the email even landed.
+  const recovered = await maybeShortCircuitRecoveredAlarm(msg);
+  if (recovered) return recovered;
+
   const handlerList =
     FIX_ACTIONS.map((a) => `  - ${a.id} (${a.riskLevel} risk): ${a.description}\n      params: ${a.paramSchema}`).join('\n') ||
     '  (no handlers registered)';
@@ -80,6 +88,74 @@ export async function classifyAlert(msg: InboundMessage): Promise<Classification
     { model: CLAUDE_MODELS.HAIKU_35, system, maxTokens: 600, temperature: 0.2 }
   );
   return normalize(raw);
+}
+
+/**
+ * If the inbound email is a CloudWatch SNS notification AND the alarm has
+ * since recovered to OK, return a routine classification instead of paying
+ * for the full Bedrock classify pass. Returns null if the email isn't a
+ * CW alarm, the alarm name can't be parsed, or the alarm is still ALARM /
+ * INSUFFICIENT_DATA / unreachable.
+ */
+async function maybeShortCircuitRecoveredAlarm(msg: InboundMessage): Promise<Classification | null> {
+  const text = `${msg.subject}\n${msg.body || msg.snippet}`;
+  // Heuristic: CloudWatch SNS emails always include both these tokens.
+  // Cheap to check and avoids querying for non-CW alerts.
+  if (!/CloudWatch|cloudwatch:alarm/i.test(text)) return null;
+
+  // Pull alarm name. Multiple possible patterns — AWS uses different
+  // templates depending on whether you're getting the SNS default or a
+  // composite alarm. Try them in order.
+  const nameMatch =
+    text.match(/Alarm\s*"([^"]+)"/) ||
+    text.match(/^- Name:\s+(.+)$/m) ||
+    text.match(/alarm:([\w.-]+)/);
+  if (!nameMatch) return null;
+  const alarmName = nameMatch[1].trim();
+
+  // Region — defaults to us-east-1 if we can't extract it
+  const regionMatch = text.match(/in (?:the\s+)?([a-z]{2}-[a-z]+-\d)|cloudwatch:([a-z]{2}-[a-z]+-\d):/i);
+  const region =
+    (regionMatch?.[1] || regionMatch?.[2] || 'us-east-1').toLowerCase();
+
+  // Need AWS creds to call CloudWatch. If missing, skip the short-circuit
+  // (full classifier still runs, behavior is unchanged from before).
+  const accessKeyId = process.env.OPENHEART_AWS_ACCESS_KEY_ID || process.env.AWS_ACCESS_KEY_ID;
+  const secretAccessKey = process.env.OPENHEART_AWS_SECRET_ACCESS_KEY || process.env.AWS_SECRET_ACCESS_KEY;
+  if (!accessKeyId || !secretAccessKey) return null;
+
+  try {
+    const { CloudWatchClient, DescribeAlarmsCommand } = await import('@aws-sdk/client-cloudwatch');
+    const cw = new CloudWatchClient({
+      region,
+      credentials: { accessKeyId, secretAccessKey },
+    });
+    const r = await cw.send(new DescribeAlarmsCommand({ AlarmNames: [alarmName] }));
+    const alarm = r.MetricAlarms?.[0] || r.CompositeAlarms?.[0];
+    if (!alarm) return null; // alarm doesn't exist (deleted?) — let normal classifier handle
+
+    if (alarm.StateValue !== 'OK') return null; // still firing — let classifier propose action
+
+    // Alarm has self-recovered. Check how long ago.
+    const updated = alarm.StateUpdatedTimestamp;
+    const ageMin = updated
+      ? Math.floor((Date.now() - new Date(updated).getTime()) / 60000)
+      : null;
+
+    return {
+      bucket: 'routine',
+      alertType: 'cloudwatch_alarm_recovered',
+      severity: 'info',
+      confidence: 0.95,
+      reasoning: `CloudWatch alarm "${alarmName}" (${region}) is currently OK${ageMin !== null ? `, recovered ${ageMin}m ago` : ''}. Email is stale — no action needed. Skipped Bedrock classifier to prevent false-positive fix suggestions.`,
+      proposedAction: null,
+      actionParams: null,
+    };
+  } catch (err: any) {
+    // If we can't reach CloudWatch, fall through to the regular classifier
+    console.warn('[classify] alarm short-circuit failed:', err?.message);
+    return null;
+  }
 }
 
 function normalize(raw: any): Classification {
