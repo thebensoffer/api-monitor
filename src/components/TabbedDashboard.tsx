@@ -280,7 +280,9 @@ export function TabbedDashboard() {
     setShowPerformanceModal(true);
   };
 
-  const tabs = [
+  // Row 1 = patient/business-facing surfaces. Row 2 = infra/ops surfaces.
+  // Two rows keeps each row from overflowing horizontally on laptop widths.
+  const tabsRow1 = [
     { id: 'overview', name: 'System Overview', icon: '📊' },
     { id: 'sent', name: 'Sent Comms', icon: '📤' },
     { id: 'payments', name: 'Payments', icon: '💳' },
@@ -289,6 +291,8 @@ export function TabbedDashboard() {
     { id: 'integrity', name: 'Integrity', icon: '🧬' },
     { id: 'audit', name: 'Audit', icon: '📋' },
     { id: 'analytics', name: 'Analytics & Traffic', icon: '📈' },
+  ];
+  const tabsRow2 = [
     { id: 'performance', name: 'Performance', icon: '⚡' },
     { id: 'flows', name: 'User Flows', icon: '🧭' },
     { id: 'crons', name: 'Crons', icon: '⏰' },
@@ -298,6 +302,7 @@ export function TabbedDashboard() {
     { id: 'builds', name: 'Deployments', icon: '🚀' },
     { id: 'business', name: 'Business Alerts', icon: '💼' },
   ];
+  const tabs = [...tabsRow1, ...tabsRow2]; // kept for any code that iterates all tabs
 
   if (loading && !statusData) {
     return (
@@ -347,24 +352,26 @@ export function TabbedDashboard() {
 
   return (
     <div className="space-y-6">
-      {/* Navigation Tabs */}
-      <div className="border-b border-gray-200">
-        <nav className="-mb-px flex space-x-8">
-          {tabs.map((tab) => (
-            <button
-              key={tab.id}
-              onClick={() => setActiveTab(tab.id)}
-              className={`${
-                activeTab === tab.id
-                  ? 'border-blue-500 text-blue-600 bg-blue-50'
-                  : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
-              } whitespace-nowrap py-3 px-4 border-b-2 font-medium text-sm rounded-t-lg transition-all cursor-pointer`}
-            >
-              <span className="mr-2">{tab.icon}</span>
-              {tab.name}
-            </button>
-          ))}
-        </nav>
+      {/* Navigation Tabs — two rows: patient/business above, infra/ops below */}
+      <div className="border-b border-gray-200 space-y-1">
+        {[tabsRow1, tabsRow2].map((row, rowIdx) => (
+          <nav key={rowIdx} className={`flex flex-wrap gap-x-6 gap-y-1 ${rowIdx === 1 ? '-mb-px' : ''}`}>
+            {row.map((tab) => (
+              <button
+                key={tab.id}
+                onClick={() => setActiveTab(tab.id)}
+                className={`${
+                  activeTab === tab.id
+                    ? 'border-blue-500 text-blue-600 bg-blue-50'
+                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                } whitespace-nowrap py-2 px-3 border-b-2 font-medium text-sm rounded-t-lg transition-all cursor-pointer`}
+              >
+                <span className="mr-2">{tab.icon}</span>
+                {tab.name}
+              </button>
+            ))}
+          </nav>
+        ))}
       </div>
 
       {/* Tab Content */}
