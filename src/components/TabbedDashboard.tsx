@@ -1101,34 +1101,40 @@ export function TabbedDashboard() {
                 })}
               </div>
 
-              {/* Recent Audits */}
-              <div className="bg-white shadow rounded-lg p-6">
-                <h4 className="text-lg font-semibold mb-4">Recent Audits</h4>
-                <div className="space-y-3">
-                  {performance.recent_audits.map((audit: any, index: number) => (
-                    <div key={index} className="flex items-center justify-between p-4 bg-gray-50 rounded-lg">
-                      <div>
-                        <div className="flex items-center space-x-2">
-                          <span className={`font-medium ${audit.site === 'DK' ? 'text-blue-600' : 'text-emerald-600'}`}>
-                            {audit.site} Audit
-                          </span>
-                          <span className="text-sm text-gray-500">
-                            {new Date(audit.timestamp).toLocaleString()}
-                          </span>
+              {/* Recent Audits — only render if API provides them.
+                  The shape (audit.site, audit.improvements, audit.issues)
+                  was a placeholder that the real /api/performance route
+                  doesn't return; guarded so the tab no longer crashes
+                  when the array is missing. */}
+              {Array.isArray((performance as any)?.recent_audits) && (performance as any).recent_audits.length > 0 && (
+                <div className="bg-white shadow rounded-lg p-6">
+                  <h4 className="text-lg font-semibold mb-4">Recent Audits</h4>
+                  <div className="space-y-3">
+                    {(performance as any).recent_audits.map((audit: any, index: number) => (
+                      <div key={index} className="flex items-center justify-between p-4 bg-gray-50 rounded-lg">
+                        <div>
+                          <div className="flex items-center space-x-2">
+                            <span className={`font-medium ${audit.site === 'DK' ? 'text-blue-600' : 'text-emerald-600'}`}>
+                              {audit.site} Audit
+                            </span>
+                            <span className="text-sm text-gray-500">
+                              {audit.timestamp ? new Date(audit.timestamp).toLocaleString() : '—'}
+                            </span>
+                          </div>
+                          <div className="text-sm text-gray-600 mt-1">
+                            Score: {audit.performance_score ?? '—'} • Issues: {Array.isArray(audit.issues) ? audit.issues.join(', ') : '—'}
+                          </div>
                         </div>
-                        <div className="text-sm text-gray-600 mt-1">
-                          Score: {audit.performance_score} • Issues: {audit.issues.join(', ')}
+                        <div className="text-right">
+                          <div className="text-sm font-medium text-green-600">
+                            {Array.isArray(audit.improvements) ? audit.improvements.join(', ') : ''}
+                          </div>
                         </div>
                       </div>
-                      <div className="text-right">
-                        <div className="text-sm font-medium text-green-600">
-                          {audit.improvements.join(', ')}
-                        </div>
-                      </div>
-                    </div>
-                  ))}
+                    ))}
+                  </div>
                 </div>
-              </div>
+              )}
             </>
           ) : performanceLoading ? (
             <div className="text-center py-12 bg-white rounded-lg shadow">
