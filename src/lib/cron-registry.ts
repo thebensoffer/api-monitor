@@ -309,38 +309,75 @@ export const CRON_REGISTRY: CronDef[] = [
       const r = await fetch(`${selfBase()}/api/integrity`, { headers: selfHeaders() });
       if (!r.ok) return { ok: false, message: `integrity API returned ${r.status}` };
       const j = await r.json();
-      const probs: string[] = [];
+
+      // Failed migrations are HIGH severity — schema drift means columns
+      // referenced by code may not exist in prod, runtime crashes are
+      // possible, and future deploys are blocked until resolved. We
+      // recently lost 3 days to silent failed migrations because they
+      // were folded into a generic medium "integrity issues" alert.
+      // Now they get their own high-severity alert with site detail.
+      const failedSites: { label: string; failedCount: number; failedNames: string[] }[] = [];
+      const otherProbs: string[] = [];
       for (const site of j.sites || []) {
         if (site.error) {
-          probs.push(`${site.label}: API error (${site.error})`);
+          otherProbs.push(`${site.label}: API error (${site.error})`);
           continue;
         }
         if (site.schema?.failedCount > 0) {
-          probs.push(`${site.label}: ${site.schema.failedCount} failed migration(s)`);
+          failedSites.push({
+            label: site.label,
+            failedCount: site.schema.failedCount,
+            failedNames: (site.schema.failedMigrations || []).map((m: any) => m.name),
+          });
         }
         if (site.orphansTotal > 0) {
           const detail = Object.entries(site.orphans || {})
             .filter(([, n]) => (n as number) > 0)
             .map(([k, n]) => `${k}=${n}`)
             .join(', ');
-          probs.push(`${site.label}: ${site.orphansTotal} orphan(s) [${detail}]`);
+          otherProbs.push(`${site.label}: ${site.orphansTotal} orphan(s) [${detail}]`);
         }
       }
-      if (probs.length > 0) {
+
+      // Separate HIGH alert for failed migrations (separate id so it
+      // dedups independently of the orphan-count alert).
+      if (failedSites.length > 0) {
+        const totalFailed = failedSites.reduce((s, x) => s + x.failedCount, 0);
         await dispatchAlert({
-          id: `integrity-issues-${new Date().toISOString().slice(0, 10)}`,
+          id: `failed-migrations-${failedSites.map((s) => s.label).sort().join(',')}`,
+          type: 'error',
+          title: `🚨 ${totalFailed} failed migration(s) on ${failedSites.length} site(s) — schema drift risk`,
+          message: failedSites
+            .map((s) => `${s.label}: ${s.failedNames.join(', ') || s.failedCount + ' failed'}`)
+            .join(' · '),
+          severity: 'high',
+          source: 'Integrity monitor',
+          action:
+            'Failed migrations block future deploys + create schema drift. Connect via psql, check _prisma_migrations, run prisma migrate resolve. See OpenHeart Integrity tab for per-migration logs.',
+        }).catch(() => {});
+      }
+
+      // Medium alert for orphans / API errors (the older behavior, kept)
+      if (otherProbs.length > 0) {
+        await dispatchAlert({
+          id: `integrity-orphans-${new Date().toISOString().slice(0, 10)}`,
           type: 'warning',
-          title: `Data integrity issues across ${probs.length} site(s)`,
-          message: probs.join(' · '),
+          title: `Data integrity issues across ${otherProbs.length} check(s)`,
+          message: otherProbs.join(' · '),
           severity: 'medium',
           source: 'Integrity monitor',
           action: 'Open OpenHeart Integrity tab → drill per-site to see which records',
         }).catch(() => {});
       }
+
+      const issueCount = failedSites.length + otherProbs.length;
       return {
-        ok: probs.length === 0,
-        message: probs.length === 0 ? 'All schemas clean, no orphans' : `${probs.length} issue(s)`,
-        data: j.summary,
+        ok: issueCount === 0,
+        message:
+          issueCount === 0
+            ? 'All schemas clean, no orphans'
+            : `${failedSites.length} site(s) with failed migrations${otherProbs.length ? `, ${otherProbs.length} other issue(s)` : ''}`,
+        data: { failedSites, otherProbs, summary: j.summary },
       };
     },
   },
