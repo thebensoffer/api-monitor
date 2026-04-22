@@ -1019,159 +1019,86 @@ export function TabbedDashboard() {
 
           {performance ? (
             <>
-              {/* Core Web Vitals */}
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                {/* DK Performance */}
-                <div className="bg-white shadow rounded-lg p-6">
-                  <h4 className="text-lg font-semibold mb-4 text-blue-800 flex items-center">
-                    🚀 DK Performance
-                    <span className="ml-2 text-sm bg-blue-100 text-blue-700 px-2 py-1 rounded-full">
-                      Score: {performance.dk.performance_score}
-                    </span>
-                  </h4>
-                  
-                  {/* Core Web Vitals */}
-                  <div className="space-y-4">
-                    <div className="flex justify-between items-center p-3 bg-gray-50 rounded-lg">
-                      <div>
-                        <span className="font-medium">Largest Contentful Paint (LCP)</span>
-                        <div className="text-sm text-gray-600">Time to render largest content</div>
-                      </div>
-                      <div className="text-right">
-                        <div className={`text-lg font-bold ${
-                          performance.dk.core_web_vitals.lcp.rating === 'good' ? 'text-green-600' : 
-                          performance.dk.core_web_vitals.lcp.rating === 'needs-improvement' ? 'text-yellow-600' : 'text-red-600'
-                        }`}>
-                          {performance.dk.core_web_vitals.lcp.value}{performance.dk.core_web_vitals.lcp.unit}
+              {/* Core Web Vitals — one card per site, defensive against missing API fields */}
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                {(
+                  [
+                    { key: 'dk', label: '🚀 DK Performance', tone: 'blue', deviceTone: 'blue' },
+                    { key: 'dbs', label: '🏥 DBS Performance', tone: 'emerald', deviceTone: 'emerald' },
+                    { key: 'tovani', label: '🩺 Tovani Performance', tone: 'indigo', deviceTone: 'indigo' },
+                  ] as const
+                ).map(({ key, label, tone, deviceTone }) => {
+                  const site: any = (performance as any)?.[key];
+                  const cwv = site?.core_web_vitals;
+                  const ratingClass = (r?: string | null) =>
+                    r === 'good' ? 'text-green-600' :
+                    r === 'needs-improvement' ? 'text-yellow-600' :
+                    r === 'poor' ? 'text-red-600' : 'text-gray-400';
+                  // Format numeric value: ms for time-based metrics, decimal for CLS, "—" if null/undefined
+                  const fmt = (v: number | null | undefined, unit: 'ms' | '' = 'ms') => {
+                    if (v == null) return '—';
+                    if (unit === 'ms') return `${Math.round(v)}ms`;
+                    return v.toFixed(3);
+                  };
+                  // 3 metrics — LCP, TBT, CLS. TBT replaces deprecated FID (Lighthouse 10+ removed FID)
+                  const metrics = [
+                    { label: 'Largest Contentful Paint (LCP)', desc: 'Time to render largest content', data: cwv?.lcp, unit: 'ms' as const },
+                    { label: 'Total Blocking Time (TBT)', desc: 'Total time blocked by JS (replaces FID)', data: cwv?.tbt, unit: 'ms' as const },
+                    { label: 'Cumulative Layout Shift (CLS)', desc: 'Visual stability score', data: cwv?.cls, unit: '' as const },
+                  ];
+                  return (
+                    <div key={key} className="bg-white shadow rounded-lg p-6">
+                      <h4 className={`text-lg font-semibold mb-4 text-${tone}-800 flex items-center`}>
+                        {label}
+                        <span className={`ml-2 text-sm bg-${tone}-100 text-${tone}-700 px-2 py-1 rounded-full`}>
+                          Score: {site?.performance_score ?? '—'}
+                        </span>
+                      </h4>
+
+                      {site?.error || !site?.core_web_vitals ? (
+                        <div className="text-sm text-gray-500 italic p-3 bg-gray-50 rounded">
+                          {site?.error || 'No performance data — PSI may not have results for this URL yet.'}
                         </div>
-                        <div className="text-xs text-gray-500 uppercase">{performance.dk.core_web_vitals.lcp.rating}</div>
-                      </div>
-                    </div>
-
-                    <div className="flex justify-between items-center p-3 bg-gray-50 rounded-lg">
-                      <div>
-                        <span className="font-medium">First Input Delay (FID)</span>
-                        <div className="text-sm text-gray-600">Time to first interaction</div>
-                      </div>
-                      <div className="text-right">
-                        <div className={`text-lg font-bold ${
-                          performance.dk.core_web_vitals.fid.rating === 'good' ? 'text-green-600' : 
-                          performance.dk.core_web_vitals.fid.rating === 'needs-improvement' ? 'text-yellow-600' : 'text-red-600'
-                        }`}>
-                          {performance.dk.core_web_vitals.fid.value}{performance.dk.core_web_vitals.fid.unit}
+                      ) : (
+                        <div className="space-y-4">
+                          {metrics.map((m) => (
+                            <div key={m.label} className="flex justify-between items-center p-3 bg-gray-50 rounded-lg">
+                              <div>
+                                <span className="font-medium">{m.label}</span>
+                                <div className="text-sm text-gray-600">{m.desc}</div>
+                              </div>
+                              <div className="text-right">
+                                <div className={`text-lg font-bold ${ratingClass(m.data?.rating)}`}>
+                                  {fmt(m.data?.value, m.unit)}
+                                </div>
+                                <div className="text-xs text-gray-500 uppercase">{m.data?.rating ?? '—'}</div>
+                              </div>
+                            </div>
+                          ))}
                         </div>
-                        <div className="text-xs text-gray-500 uppercase">{performance.dk.core_web_vitals.fid.rating}</div>
-                      </div>
-                    </div>
+                      )}
 
-                    <div className="flex justify-between items-center p-3 bg-gray-50 rounded-lg">
-                      <div>
-                        <span className="font-medium">Cumulative Layout Shift (CLS)</span>
-                        <div className="text-sm text-gray-600">Visual stability score</div>
-                      </div>
-                      <div className="text-right">
-                        <div className={`text-lg font-bold ${
-                          performance.dk.core_web_vitals.cls.rating === 'good' ? 'text-green-600' : 
-                          performance.dk.core_web_vitals.cls.rating === 'needs-improvement' ? 'text-yellow-600' : 'text-red-600'
-                        }`}>
-                          {performance.dk.core_web_vitals.cls.value}
+                      {/* Mobile vs Desktop */}
+                      <div className="mt-6 pt-4 border-t border-gray-200">
+                        <h5 className="font-medium mb-3">Device Performance</h5>
+                        <div className="grid grid-cols-2 gap-4">
+                          <div className={`text-center p-3 bg-${deviceTone}-50 rounded-lg`}>
+                            <div className={`text-xl font-bold text-${deviceTone}-600`}>
+                              {site?.mobile?.performance_score ?? '—'}
+                            </div>
+                            <div className={`text-xs text-${deviceTone}-700`}>📱 Mobile</div>
+                          </div>
+                          <div className="text-center p-3 bg-green-50 rounded-lg">
+                            <div className="text-xl font-bold text-green-600">
+                              {site?.desktop?.performance_score ?? '—'}
+                            </div>
+                            <div className="text-xs text-green-700">💻 Desktop</div>
+                          </div>
                         </div>
-                        <div className="text-xs text-gray-500 uppercase">{performance.dk.core_web_vitals.cls.rating}</div>
                       </div>
                     </div>
-                  </div>
-
-                  {/* Mobile vs Desktop */}
-                  <div className="mt-6 pt-4 border-t border-gray-200">
-                    <h5 className="font-medium mb-3">Device Performance</h5>
-                    <div className="grid grid-cols-2 gap-4">
-                      <div className="text-center p-3 bg-blue-50 rounded-lg">
-                        <div className="text-xl font-bold text-blue-600">{performance.dk.mobile.performance_score}</div>
-                        <div className="text-xs text-blue-700">📱 Mobile</div>
-                      </div>
-                      <div className="text-center p-3 bg-green-50 rounded-lg">
-                        <div className="text-xl font-bold text-green-600">{performance.dk.desktop.performance_score}</div>
-                        <div className="text-xs text-green-700">💻 Desktop</div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                {/* DBS Performance */}
-                <div className="bg-white shadow rounded-lg p-6">
-                  <h4 className="text-lg font-semibold mb-4 text-emerald-800 flex items-center">
-                    🏥 DBS Performance
-                    <span className="ml-2 text-sm bg-emerald-100 text-emerald-700 px-2 py-1 rounded-full">
-                      Score: {performance.dbs.performance_score}
-                    </span>
-                  </h4>
-                  
-                  {/* Core Web Vitals */}
-                  <div className="space-y-4">
-                    <div className="flex justify-between items-center p-3 bg-gray-50 rounded-lg">
-                      <div>
-                        <span className="font-medium">Largest Contentful Paint (LCP)</span>
-                        <div className="text-sm text-gray-600">Time to render largest content</div>
-                      </div>
-                      <div className="text-right">
-                        <div className={`text-lg font-bold ${
-                          performance.dbs.core_web_vitals.lcp.rating === 'good' ? 'text-green-600' : 
-                          performance.dbs.core_web_vitals.lcp.rating === 'needs-improvement' ? 'text-yellow-600' : 'text-red-600'
-                        }`}>
-                          {performance.dbs.core_web_vitals.lcp.value}{performance.dbs.core_web_vitals.lcp.unit}
-                        </div>
-                        <div className="text-xs text-gray-500 uppercase">{performance.dbs.core_web_vitals.lcp.rating}</div>
-                      </div>
-                    </div>
-
-                    <div className="flex justify-between items-center p-3 bg-gray-50 rounded-lg">
-                      <div>
-                        <span className="font-medium">First Input Delay (FID)</span>
-                        <div className="text-sm text-gray-600">Time to first interaction</div>
-                      </div>
-                      <div className="text-right">
-                        <div className={`text-lg font-bold ${
-                          performance.dbs.core_web_vitals.fid.rating === 'good' ? 'text-green-600' : 
-                          performance.dbs.core_web_vitals.fid.rating === 'needs-improvement' ? 'text-yellow-600' : 'text-red-600'
-                        }`}>
-                          {performance.dbs.core_web_vitals.fid.value}{performance.dbs.core_web_vitals.fid.unit}
-                        </div>
-                        <div className="text-xs text-gray-500 uppercase">{performance.dbs.core_web_vitals.fid.rating}</div>
-                      </div>
-                    </div>
-
-                    <div className="flex justify-between items-center p-3 bg-gray-50 rounded-lg">
-                      <div>
-                        <span className="font-medium">Cumulative Layout Shift (CLS)</span>
-                        <div className="text-sm text-gray-600">Visual stability score</div>
-                      </div>
-                      <div className="text-right">
-                        <div className={`text-lg font-bold ${
-                          performance.dbs.core_web_vitals.cls.rating === 'good' ? 'text-green-600' : 
-                          performance.dbs.core_web_vitals.cls.rating === 'needs-improvement' ? 'text-yellow-600' : 'text-red-600'
-                        }`}>
-                          {performance.dbs.core_web_vitals.cls.value}
-                        </div>
-                        <div className="text-xs text-gray-500 uppercase">{performance.dbs.core_web_vitals.cls.rating}</div>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* Mobile vs Desktop */}
-                  <div className="mt-6 pt-4 border-t border-gray-200">
-                    <h5 className="font-medium mb-3">Device Performance</h5>
-                    <div className="grid grid-cols-2 gap-4">
-                      <div className="text-center p-3 bg-emerald-50 rounded-lg">
-                        <div className="text-xl font-bold text-emerald-600">{performance.dbs.mobile.performance_score}</div>
-                        <div className="text-xs text-emerald-700">📱 Mobile</div>
-                      </div>
-                      <div className="text-center p-3 bg-green-50 rounded-lg">
-                        <div className="text-xl font-bold text-green-600">{performance.dbs.desktop.performance_score}</div>
-                        <div className="text-xs text-green-700">💻 Desktop</div>
-                      </div>
-                    </div>
-                  </div>
-                </div>
+                  );
+                })}
               </div>
 
               {/* Recent Audits */}
