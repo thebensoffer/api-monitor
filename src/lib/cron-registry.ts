@@ -638,6 +638,127 @@ export const CRON_REGISTRY: CronDef[] = [
     },
   },
   {
+    id: 'pipeline-heartbeat',
+    group: 'monitoring',
+    schedule: 'cron(0 9 * * ? *)', // 5 AM EDT / 4 AM EST (9 UTC)
+    description:
+      'Daily heartbeat for the alert-triage pipeline. Writes a synthetic inbound email so the regular 10-min triage cron has a known-good signal to classify. Alerts HIGH if the previous day\'s heartbeat never reached the triage items table (pipeline stuck).',
+    handler: async () => {
+      const { DynamoDBClient } = await import('@aws-sdk/client-dynamodb');
+      const { DynamoDBDocumentClient, PutCommand, ScanCommand } = await import(
+        '@aws-sdk/lib-dynamodb'
+      );
+      const { dispatchAlert } = await import('@/lib/notify');
+
+      const accessKeyId =
+        process.env.OPENHEART_AWS_ACCESS_KEY_ID || process.env.AWS_ACCESS_KEY_ID;
+      const secretAccessKey =
+        process.env.OPENHEART_AWS_SECRET_ACCESS_KEY || process.env.AWS_SECRET_ACCESS_KEY;
+      if (!accessKeyId || !secretAccessKey) {
+        return { ok: false, message: 'AWS creds missing' };
+      }
+
+      const doc = DynamoDBDocumentClient.from(
+        new DynamoDBClient({
+          region: process.env.OPENHEART_AWS_REGION || 'us-east-1',
+          credentials: { accessKeyId, secretAccessKey },
+        })
+      );
+
+      const INBOX_TABLE =
+        process.env.DYNAMODB_INBOUND_EMAILS_TABLE || 'api-monitor-inbound-emails';
+      const TRIAGE_TABLE =
+        process.env.DYNAMODB_TRIAGE_ITEMS_TABLE || 'api-monitor-triage-items';
+
+      // Step 1 — watchdog: find the most recent classified heartbeat and
+      // alert if it's been > 25 hours (should be ~24h between daily runs).
+      // On very first ever run there will be no classified heartbeat yet;
+      // swallow that cold-start case with a clear message instead of
+      // dispatching a false alarm.
+      const nowMs = Date.now();
+      let mostRecentHeartbeatMs = 0;
+      let prevRunFound = false;
+      try {
+        const scan = await doc.send(
+          new ScanCommand({
+            TableName: TRIAGE_TABLE,
+            FilterExpression: 'fromEmail = :f',
+            ExpressionAttributeValues: { ':f': 'heartbeat@openheart.local' },
+            ProjectionExpression: 'createdAt',
+          })
+        );
+        for (const item of scan.Items || []) {
+          const t = new Date(String(item.createdAt)).getTime();
+          if (t > mostRecentHeartbeatMs) mostRecentHeartbeatMs = t;
+        }
+        prevRunFound = mostRecentHeartbeatMs > 0;
+      } catch (err: any) {
+        console.warn('[heartbeat] watchdog scan failed:', err?.message);
+      }
+
+      const ageHours = prevRunFound ? (nowMs - mostRecentHeartbeatMs) / 3600_000 : null;
+      let watchdogAlerted = false;
+      if (prevRunFound && ageHours !== null && ageHours > 25) {
+        await dispatchAlert({
+          id: `heartbeat-stale-${new Date().toISOString().slice(0, 10)}`,
+          type: 'error',
+          severity: 'high',
+          title: `Alert-triage pipeline may be stuck (${ageHours.toFixed(1)}h since last heartbeat)`,
+          message: [
+            `Most recent heartbeat classified ${ageHours.toFixed(1)}h ago.`,
+            `Expected < 25h between daily heartbeats.`,
+            `Check: EventBridge rule openheart-cron-email-alert-triage-rule, the 10-min triage cron logs, and api-monitor-inbound-emails DDB for triaged='false' rows.`,
+          ].join('\n'),
+          source: 'pipeline-heartbeat watchdog',
+          action: 'Check EventBridge rules + OpenHeart cron logs in CloudWatch.',
+        }).catch((err) => console.error('[heartbeat] dispatchAlert failed:', err?.message));
+        watchdogAlerted = true;
+      }
+
+      // Step 2 — emit: drop a fresh synthetic inbound row so tomorrow's
+      // watchdog has something to find. The regular 10-min triage cron
+      // picks this up via the untriaged-index GSI and classifies it;
+      // our classifier has no special-case for this, it'll just bucket
+      // as routine/info based on the email content (which is fine — we
+      // only care that a triage-item row gets written).
+      const id = `heartbeat-${nowMs}-${Math.random().toString(36).slice(2, 8)}`;
+      const receivedAt = new Date(nowMs).toISOString();
+      await doc.send(
+        new PutCommand({
+          TableName: INBOX_TABLE,
+          Item: {
+            id,
+            receivedAt,
+            fromEmail: 'heartbeat@openheart.local',
+            subject: '[heartbeat] daily triage-pipeline synthetic',
+            textBody:
+              'Automated daily heartbeat from the OpenHeart alert-triage watchdog. ' +
+              'If you are reading this in your inbox, it means the triage cron is ' +
+              'failing to classify routine items — it should be bucketing this as ' +
+              'routine/info and suppressing the digest. Check cron health.',
+            snippet: '[heartbeat] daily pipeline ping',
+            recipientDomain: 'openheart.local',
+            platform: 'heartbeat',
+            messageId: null,
+            triaged: 'false',
+          },
+        })
+      );
+
+      return {
+        ok: true,
+        message: prevRunFound
+          ? `emitted ${id}; prior heartbeat ${ageHours!.toFixed(1)}h ago${watchdogAlerted ? ' (ALERTED — stale)' : ''}`
+          : `emitted ${id}; cold start — no prior heartbeat found, skipping watchdog`,
+        data: {
+          emittedId: id,
+          priorHeartbeatAgeHours: ageHours,
+          watchdogAlerted,
+        },
+      };
+    },
+  },
+  {
     id: 'backup-verification',
     group: 'monitoring',
     schedule: 'cron(30 10 * * ? *)',
