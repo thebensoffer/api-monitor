@@ -759,6 +759,318 @@ export const CRON_REGISTRY: CronDef[] = [
     },
   },
   {
+    id: 'cron-liveness-watchdog',
+    group: 'monitoring',
+    schedule: 'cron(0 11 * * ? *)', // 7 AM EDT / 6 AM EST — 2h after pipeline-heartbeat
+    description:
+      'Sweeps every *-cron-* Lambda in the account (tovani/dk/openheart/dbs). For each one that has an ENABLED EventBridge rule, checks CloudWatch Invocations metric for the last 3× schedule window. Alerts HIGH if any Lambda has not invoked within 2× its schedule.',
+    handler: async () => {
+      const { LambdaClient, ListFunctionsCommand } = await import('@aws-sdk/client-lambda');
+      const {
+        EventBridgeClient,
+        ListRuleNamesByTargetCommand,
+        DescribeRuleCommand,
+      } = await import('@aws-sdk/client-eventbridge');
+      const { CloudWatchClient, GetMetricStatisticsCommand } = await import(
+        '@aws-sdk/client-cloudwatch'
+      );
+      const { dispatchAlert } = await import('@/lib/notify');
+
+      const accessKeyId =
+        process.env.OPENHEART_AWS_ACCESS_KEY_ID || process.env.AWS_ACCESS_KEY_ID;
+      const secretAccessKey =
+        process.env.OPENHEART_AWS_SECRET_ACCESS_KEY || process.env.AWS_SECRET_ACCESS_KEY;
+      if (!accessKeyId || !secretAccessKey) {
+        return { ok: false, message: 'AWS creds missing' };
+      }
+      const region = process.env.OPENHEART_AWS_REGION || 'us-east-1';
+      const credentials = { accessKeyId, secretAccessKey };
+      const lambda = new LambdaClient({ region, credentials });
+      const events = new EventBridgeClient({ region, credentials });
+      const cw = new CloudWatchClient({ region, credentials });
+
+      // Parse AWS EventBridge schedule expressions into an expected
+      // "max gap between invocations" in milliseconds. cron expressions
+      // are treated as daily (24h) — not perfectly accurate for e.g.
+      // weekly crons but safer than under-estimating.
+      function expectedGapMs(schedule: string): number | null {
+        const rate = schedule.match(/^rate\((\d+)\s+(minutes?|hours?|days?)\)$/i);
+        if (rate) {
+          const n = parseInt(rate[1], 10);
+          const unit = rate[2].toLowerCase();
+          if (unit.startsWith('minute')) return n * 60_000;
+          if (unit.startsWith('hour')) return n * 3_600_000;
+          if (unit.startsWith('day')) return n * 86_400_000;
+        }
+        if (/^cron\(/.test(schedule)) return 86_400_000; // default: daily
+        return null;
+      }
+
+      // 1. List every *-cron-* Lambda in the account
+      const names: string[] = [];
+      let marker: string | undefined;
+      do {
+        const r = await lambda.send(
+          new ListFunctionsCommand({ Marker: marker, MaxItems: 50 })
+        );
+        for (const fn of r.Functions ?? []) {
+          if (
+            fn.FunctionName &&
+            /^(tovani|dk|drbensoffer|dbs|openheart)-cron-/.test(fn.FunctionName)
+          ) {
+            names.push(fn.FunctionName);
+          }
+        }
+        marker = r.NextMarker ?? undefined;
+      } while (marker);
+
+      const stale: Array<{
+        fn: string;
+        schedule: string;
+        lastInvokedISO: string | null;
+        ageHours: number | null;
+        expectedHours: number;
+      }> = [];
+      const checked: string[] = [];
+      const skipped: Array<{ fn: string; reason: string }> = [];
+
+      const accountId = process.env.OPENHEART_AWS_ACCOUNT_ID || '035949051700';
+
+      for (const fn of names) {
+        const fnArn = `arn:aws:lambda:${region}:${accountId}:function:${fn}`;
+
+        // Find the rule(s) targeting this Lambda
+        let schedule: string | null = null;
+        let ruleState: string | null = null;
+        try {
+          const rr = await events.send(new ListRuleNamesByTargetCommand({ TargetArn: fnArn }));
+          const ruleName = rr.RuleNames?.[0];
+          if (!ruleName) {
+            skipped.push({ fn, reason: 'no EventBridge rule targets this Lambda' });
+            continue;
+          }
+          const rule = await events.send(new DescribeRuleCommand({ Name: ruleName }));
+          schedule = rule.ScheduleExpression ?? null;
+          ruleState = rule.State ?? null;
+        } catch (err: any) {
+          skipped.push({ fn, reason: `events lookup failed: ${err?.message}` });
+          continue;
+        }
+        if (!schedule) {
+          skipped.push({ fn, reason: 'rule has no ScheduleExpression' });
+          continue;
+        }
+        if (ruleState !== 'ENABLED') {
+          skipped.push({ fn, reason: `rule state = ${ruleState}` });
+          continue;
+        }
+
+        const expected = expectedGapMs(schedule);
+        if (!expected) {
+          skipped.push({ fn, reason: `unparseable schedule: ${schedule}` });
+          continue;
+        }
+
+        // CloudWatch Invocations metric, last 3× expected window
+        const endTime = new Date();
+        const startTime = new Date(Date.now() - expected * 3);
+        const m = await cw.send(
+          new GetMetricStatisticsCommand({
+            Namespace: 'AWS/Lambda',
+            MetricName: 'Invocations',
+            Dimensions: [{ Name: 'FunctionName', Value: fn }],
+            StartTime: startTime,
+            EndTime: endTime,
+            Period: 60,
+            Statistics: ['Sum'],
+          })
+        );
+        const dps = (m.Datapoints ?? [])
+          .filter((d) => (d.Sum ?? 0) > 0)
+          .sort((a, b) => (b.Timestamp!.getTime() - a.Timestamp!.getTime()));
+        const lastInvoked = dps[0]?.Timestamp ?? null;
+
+        checked.push(fn);
+        const ageMs = lastInvoked ? Date.now() - lastInvoked.getTime() : Infinity;
+        if (ageMs > expected * 2) {
+          stale.push({
+            fn,
+            schedule,
+            lastInvokedISO: lastInvoked?.toISOString() ?? null,
+            ageHours: lastInvoked ? +(ageMs / 3_600_000).toFixed(1) : null,
+            expectedHours: +(expected / 3_600_000).toFixed(2),
+          });
+        }
+      }
+
+      if (stale.length > 0) {
+        const lines = stale.map(
+          (s) =>
+            `• ${s.fn}  (${s.schedule})  — last ${s.ageHours ?? 'never'}h ago, expected every ${s.expectedHours}h`
+        );
+        await dispatchAlert({
+          id: `cron-liveness-${new Date().toISOString().slice(0, 10)}`,
+          type: 'error',
+          severity: 'high',
+          title: `${stale.length} cron Lambda${stale.length > 1 ? 's' : ''} stale — possibly stopped firing`,
+          message: lines.join('\n'),
+          source: 'cron-liveness-watchdog',
+          action:
+            'Check EventBridge rule state + most recent CloudWatch logs for each stale function.',
+        }).catch((err) => console.error('[cron-liveness] dispatchAlert:', err?.message));
+      }
+
+      return {
+        ok: stale.length === 0,
+        message: `checked ${checked.length}, stale ${stale.length}, skipped ${skipped.length}`,
+        data: { checked: checked.length, stale, skippedCount: skipped.length, skipped },
+      };
+    },
+  },
+  {
+    id: 'ses-reputation-watchdog',
+    group: 'monitoring',
+    schedule: 'cron(30 11 * * ? *)', // 7:30 AM EDT / 6:30 AM EST
+    description:
+      'Daily check of SES reputation via CloudWatch AWS/SES metrics (Reputation.BounceRate + Reputation.ComplaintRate). AWS auto-suspends at 10% bounce / 0.5% complaint; alerts well before that so we can triage the sending path before it gets throttled.',
+    handler: async () => {
+      const { CloudWatchClient, GetMetricDataCommand } = await import(
+        '@aws-sdk/client-cloudwatch'
+      );
+      const { dispatchAlert } = await import('@/lib/notify');
+
+      const accessKeyId =
+        process.env.OPENHEART_AWS_ACCESS_KEY_ID || process.env.AWS_ACCESS_KEY_ID;
+      const secretAccessKey =
+        process.env.OPENHEART_AWS_SECRET_ACCESS_KEY || process.env.AWS_SECRET_ACCESS_KEY;
+      if (!accessKeyId || !secretAccessKey) {
+        return { ok: false, message: 'AWS creds missing' };
+      }
+      const region = process.env.OPENHEART_AWS_REGION || 'us-east-1';
+      const cw = new CloudWatchClient({
+        region,
+        credentials: { accessKeyId, secretAccessKey },
+      });
+
+      const endTime = new Date();
+      const startTime = new Date(Date.now() - 48 * 3_600_000); // 48h window
+      // AWS/SES publishes Reputation.BounceRate + Reputation.ComplaintRate as
+      // account-level rolling values. Also pull raw Send/Bounce/Complaint for
+      // context in the alert body.
+      const r = await cw.send(
+        new GetMetricDataCommand({
+          StartTime: startTime,
+          EndTime: endTime,
+          ScanBy: 'TimestampDescending',
+          MetricDataQueries: [
+            {
+              Id: 'br',
+              MetricStat: {
+                Metric: { Namespace: 'AWS/SES', MetricName: 'Reputation.BounceRate' },
+                Period: 3600,
+                Stat: 'Maximum',
+              },
+              ReturnData: true,
+            },
+            {
+              Id: 'cr',
+              MetricStat: {
+                Metric: { Namespace: 'AWS/SES', MetricName: 'Reputation.ComplaintRate' },
+                Period: 3600,
+                Stat: 'Maximum',
+              },
+              ReturnData: true,
+            },
+            {
+              Id: 'sends',
+              MetricStat: {
+                Metric: { Namespace: 'AWS/SES', MetricName: 'Send' },
+                Period: 86400,
+                Stat: 'Sum',
+              },
+              ReturnData: true,
+            },
+            {
+              Id: 'bounces',
+              MetricStat: {
+                Metric: { Namespace: 'AWS/SES', MetricName: 'Bounce' },
+                Period: 86400,
+                Stat: 'Sum',
+              },
+              ReturnData: true,
+            },
+            {
+              Id: 'complaints',
+              MetricStat: {
+                Metric: { Namespace: 'AWS/SES', MetricName: 'Complaint' },
+                Period: 86400,
+                Stat: 'Sum',
+              },
+              ReturnData: true,
+            },
+          ],
+        })
+      );
+
+      const byId = Object.fromEntries(
+        (r.MetricDataResults ?? []).map((m) => [m.Id, m.Values ?? []])
+      );
+      const maxOr = (xs: number[], fallback = 0) =>
+        xs.length ? Math.max(...xs) : fallback;
+      const sumOr = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
+
+      const bounceRate = maxOr(byId.br || []); // 0–1
+      const complaintRate = maxOr(byId.cr || []); // 0–1
+      const sends = sumOr(byId.sends || []);
+      const bounces = sumOr(byId.bounces || []);
+      const complaints = sumOr(byId.complaints || []);
+
+      // AWS suspends at 10% bounce / 0.5% complaint. Alert at half that so
+      // we have room to triage.
+      const WARN_BOUNCE = 0.05;
+      const WARN_COMPLAINT = 0.001;
+      const CRIT_BOUNCE = 0.08;
+      const CRIT_COMPLAINT = 0.003;
+
+      const alerting =
+        bounceRate >= WARN_BOUNCE || complaintRate >= WARN_COMPLAINT;
+      const severity: 'high' | 'medium' =
+        bounceRate >= CRIT_BOUNCE || complaintRate >= CRIT_COMPLAINT ? 'high' : 'medium';
+
+      if (alerting) {
+        await dispatchAlert({
+          id: `ses-reputation-${new Date().toISOString().slice(0, 10)}`,
+          type: bounceRate >= CRIT_BOUNCE || complaintRate >= CRIT_COMPLAINT ? 'error' : 'warning',
+          severity,
+          title: `SES reputation degraded — bounce ${(bounceRate * 100).toFixed(2)}%, complaint ${(complaintRate * 100).toFixed(3)}%`,
+          message: [
+            `Past 48h: ${sends} sends, ${bounces} bounces, ${complaints} complaints.`,
+            `BounceRate: ${(bounceRate * 100).toFixed(2)}% (warn ≥ 5%, crit ≥ 8%; AWS suspends at 10%)`,
+            `ComplaintRate: ${(complaintRate * 100).toFixed(3)}% (warn ≥ 0.1%, crit ≥ 0.3%; AWS suspends at 0.5%)`,
+          ].join('\n'),
+          source: 'ses-reputation-watchdog',
+          action:
+            'Check SES console → Reputation. Common causes: hitting a bad list, a transactional template malformed, or a suppressed address re-added to a list.',
+        }).catch((err) => console.error('[ses-reputation] dispatchAlert:', err?.message));
+      }
+
+      return {
+        ok: !alerting,
+        message: alerting
+          ? `ALERTED — bounce ${(bounceRate * 100).toFixed(2)}%, complaint ${(complaintRate * 100).toFixed(3)}%`
+          : `healthy — bounce ${(bounceRate * 100).toFixed(2)}%, complaint ${(complaintRate * 100).toFixed(3)}% over ${sends} sends`,
+        data: {
+          bounceRate,
+          complaintRate,
+          sends,
+          bounces,
+          complaints,
+          windowHours: 48,
+        },
+      };
+    },
+  },
+  {
     id: 'backup-verification',
     group: 'monitoring',
     schedule: 'cron(30 10 * * ? *)',
