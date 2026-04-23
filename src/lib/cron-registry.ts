@@ -656,7 +656,32 @@ export const CRON_REGISTRY: CronDef[] = [
         });
         const STALE_HOURS = 26; // RDS automated backups fire daily; 26h leaves a 2h grace window
         const now = Date.now();
-        const stale: { instance: string; ageHours: number | null; status: string }[] = [];
+        const stale: { instance: string; ageHours: number | null; status: string; reason: string }[] = [];
+
+        // What "fresh enough" means depends on what restore-target you care about:
+        //   1. PITR (Point-In-Time Restore) — covered by the LatestRestorableTime
+        //      AWS exposes per-instance/cluster, typically <5 min behind live writes
+        //      regardless of when the most recent snapshot ran.
+        //   2. Snapshot-based restore — covered by the SnapshotCreateTime of the
+        //      most recent automated snapshot. This is the one that becomes "stale"
+        //      if AWS's daily backup window misses or backups are disabled.
+        //
+        // Old logic alerted purely on snapshot age, which fired false-positives for
+        // DBs with healthy PITR but old snapshots (e.g. small side-project DBs that
+        // technically have backups but rarely take fresh snapshots). New logic:
+        // a DB is "stale" only if BOTH PITR-window is missing/old AND no recent
+        // snapshot exists. This eliminates the false alarms we just got on
+        // beyondthederech (75h) + ganeden-db (409h) — both have PITR a few min ago.
+        const PITR_FRESH_HOURS = 4; // PITR latest-restorable should be within last 4h
+
+        const isStale = (ageHours: number | null, status: string, pitrAgeHours: number | null) => {
+          // Snapshot is "fresh" if status=available AND age <= STALE_HOURS
+          const snapshotFresh = status === 'available' && ageHours !== null && ageHours <= STALE_HOURS;
+          // PITR is "fresh" if last restorable point is within PITR_FRESH_HOURS
+          const pitrFresh = pitrAgeHours !== null && pitrAgeHours <= PITR_FRESH_HOURS;
+          // Stale only if BOTH safety nets are missing
+          return !snapshotFresh && !pitrFresh;
+        };
 
         // 1) Standalone instances
         const instances = await rds.send(new DescribeDBInstancesCommand({})).catch(() => ({ DBInstances: [] }));
@@ -675,6 +700,9 @@ export const CRON_REGISTRY: CronDef[] = [
             ? Math.floor((now - recent.SnapshotCreateTime.getTime()) / 3600000)
             : null;
           const status = recent?.Status || 'no-snapshot';
+          const pitrAgeHours = inst.LatestRestorableTime
+            ? Math.floor((now - inst.LatestRestorableTime.getTime()) / 3600000)
+            : null;
           instanceResults.push({
             instance: inst.DBInstanceIdentifier,
             engine: inst.Engine,
@@ -682,9 +710,14 @@ export const CRON_REGISTRY: CronDef[] = [
             sizeGb: recent?.AllocatedStorage,
             ageHours,
             status,
+            pitrAgeHours,
+            retentionDays: inst.BackupRetentionPeriod,
           });
-          if (status !== 'available' || ageHours === null || ageHours > STALE_HOURS) {
-            stale.push({ instance: inst.DBInstanceIdentifier, ageHours, status });
+          if (isStale(ageHours, status, pitrAgeHours)) {
+            const reason = pitrAgeHours === null
+              ? 'no PITR window AND ' + (status !== 'available' ? `snapshot status=${status}` : `last snapshot ${ageHours}h old`)
+              : `PITR ${pitrAgeHours}h old AND last snapshot ${ageHours}h old (status=${status})`;
+            stale.push({ instance: inst.DBInstanceIdentifier, ageHours, status, reason });
           }
         }
 
@@ -705,6 +738,9 @@ export const CRON_REGISTRY: CronDef[] = [
             ? Math.floor((now - recent.SnapshotCreateTime.getTime()) / 3600000)
             : null;
           const status = recent?.Status || 'no-snapshot';
+          const pitrAgeHours = cl.LatestRestorableTime
+            ? Math.floor((now - cl.LatestRestorableTime.getTime()) / 3600000)
+            : null;
           clusterResults.push({
             cluster: cl.DBClusterIdentifier,
             engine: cl.Engine,
@@ -712,9 +748,14 @@ export const CRON_REGISTRY: CronDef[] = [
             sizeGb: recent?.AllocatedStorage,
             ageHours,
             status,
+            pitrAgeHours,
+            retentionDays: cl.BackupRetentionPeriod,
           });
-          if (status !== 'available' || ageHours === null || ageHours > STALE_HOURS) {
-            stale.push({ instance: cl.DBClusterIdentifier, ageHours, status });
+          if (isStale(ageHours, status, pitrAgeHours)) {
+            const reason = pitrAgeHours === null
+              ? 'no PITR window AND ' + (status !== 'available' ? `snapshot status=${status}` : `last snapshot ${ageHours}h old`)
+              : `PITR ${pitrAgeHours}h old AND last snapshot ${ageHours}h old (status=${status})`;
+            stale.push({ instance: cl.DBClusterIdentifier, ageHours, status, reason });
           }
         }
 
@@ -722,8 +763,8 @@ export const CRON_REGISTRY: CronDef[] = [
           await dispatchAlert({
             id: `backup-stale-${stale.map((s) => s.instance).sort().join(',')}`,
             type: 'error',
-            title: `${stale.length} RDS backup(s) stale or missing`,
-            message: stale.map((s) => `${s.instance}: ${s.status}, age=${s.ageHours === null ? '?' : s.ageHours + 'h'}`).join('; '),
+            title: `${stale.length} RDS backup(s) genuinely stale (PITR + snapshot both missing)`,
+            message: stale.map((s) => `${s.instance}: ${s.reason}`).join('; '),
             severity: 'high',
             source: 'RDS backup verification',
             action: 'Check AWS RDS console — automated backups may be disabled or failing',
