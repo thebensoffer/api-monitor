@@ -871,9 +871,14 @@ export const CRON_REGISTRY: CronDef[] = [
           continue;
         }
 
-        // CloudWatch Invocations metric, last 3× expected window
+        // CloudWatch Invocations metric, last 3× expected window.
+        // CloudWatch caps at 1440 datapoints per call; pick a period that
+        // divides the window cleanly and stays well under the cap.
+        const windowMs = expected * 3;
+        const MAX_DP = 1200;
+        const period = Math.max(60, Math.ceil(windowMs / 1000 / MAX_DP / 60) * 60);
         const endTime = new Date();
-        const startTime = new Date(Date.now() - expected * 3);
+        const startTime = new Date(Date.now() - windowMs);
         const m = await cw.send(
           new GetMetricStatisticsCommand({
             Namespace: 'AWS/Lambda',
@@ -881,7 +886,7 @@ export const CRON_REGISTRY: CronDef[] = [
             Dimensions: [{ Name: 'FunctionName', Value: fn }],
             StartTime: startTime,
             EndTime: endTime,
-            Period: 60,
+            Period: period,
             Statistics: ['Sum'],
           })
         );
