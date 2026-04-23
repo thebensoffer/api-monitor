@@ -790,9 +790,14 @@ export const CRON_REGISTRY: CronDef[] = [
       const cw = new CloudWatchClient({ region, credentials });
 
       // Parse AWS EventBridge schedule expressions into an expected
-      // "max gap between invocations" in milliseconds. cron expressions
-      // are treated as daily (24h) — not perfectly accurate for e.g.
-      // weekly crons but safer than under-estimating.
+      // "max gap between invocations" in milliseconds.
+      //
+      // AWS cron syntax: cron(Min Hour DayOfMonth Month DayOfWeek Year)
+      // One of DayOfMonth / DayOfWeek must be '?'. Use the non-wildcard
+      // field to classify:
+      //   daily   = both wildcards → 24h
+      //   weekly  = DayOfWeek names/nums → 168h (7 days)
+      //   monthly = DayOfMonth specific → 31 days
       function expectedGapMs(schedule: string): number | null {
         const rate = schedule.match(/^rate\((\d+)\s+(minutes?|hours?|days?)\)$/i);
         if (rate) {
@@ -802,7 +807,19 @@ export const CRON_REGISTRY: CronDef[] = [
           if (unit.startsWith('hour')) return n * 3_600_000;
           if (unit.startsWith('day')) return n * 86_400_000;
         }
-        if (/^cron\(/.test(schedule)) return 86_400_000; // default: daily
+        const cron = schedule.match(/^cron\(([^)]+)\)$/);
+        if (cron) {
+          const parts = cron[1].trim().split(/\s+/); // Min Hour DoM Mo DoW Year
+          if (parts.length >= 5) {
+            const dom = parts[2];
+            const dow = parts[4];
+            const domIsSpecific = dom !== '*' && dom !== '?';
+            const dowIsSpecific = dow !== '*' && dow !== '?';
+            if (dowIsSpecific) return 7 * 86_400_000; // weekly-ish
+            if (domIsSpecific) return 31 * 86_400_000; // monthly
+          }
+          return 86_400_000; // daily default
+        }
         return null;
       }
 
