@@ -2413,6 +2413,118 @@ export const CRON_REGISTRY: CronDef[] = [
     },
   },
   {
+    id: 'pinpoint-tier-watch',
+    addedAt: '2026-04-24T00:00:00Z',
+    group: 'monitoring',
+    schedule: 'rate(6 hours)',
+    description: 'Polls AWS End User Messaging SMS account tier. Alerts the moment AWS approves the production-access request (SANDBOX → STANDARD), so the Twilio→Pinpoint migration can begin. Also surfaces spend-limit + verified-destination changes.',
+    handler: async () => {
+      const accessKeyId = process.env.OPENHEART_AWS_ACCESS_KEY_ID || process.env.AWS_ACCESS_KEY_ID;
+      const secretAccessKey = process.env.OPENHEART_AWS_SECRET_ACCESS_KEY || process.env.AWS_SECRET_ACCESS_KEY;
+      if (!accessKeyId || !secretAccessKey) {
+        return { ok: false, message: 'AWS creds missing' };
+      }
+      try {
+        const {
+          PinpointSMSVoiceV2Client,
+          DescribeAccountAttributesCommand,
+          DescribeSpendLimitsCommand,
+          DescribePhoneNumbersCommand,
+          DescribeVerifiedDestinationNumbersCommand,
+        } = await import('@aws-sdk/client-pinpoint-sms-voice-v2');
+        const sms = new PinpointSMSVoiceV2Client({
+          region: process.env.OPENHEART_AWS_REGION || 'us-east-1',
+          credentials: { accessKeyId, secretAccessKey },
+        });
+
+        const [attrs, spend, phones, verified] = await Promise.all([
+          sms.send(new DescribeAccountAttributesCommand({})).catch((e) => ({ AccountAttributes: [], _err: e?.message })),
+          sms.send(new DescribeSpendLimitsCommand({})).catch((e) => ({ SpendLimits: [], _err: e?.message })),
+          sms.send(new DescribePhoneNumbersCommand({})).catch((e) => ({ PhoneNumbers: [], _err: e?.message })),
+          sms.send(new DescribeVerifiedDestinationNumbersCommand({})).catch((e) => ({ VerifiedDestinationNumbers: [], _err: e?.message })),
+        ]);
+
+        const tier = (attrs as any).AccountAttributes?.find((a: any) => a.Name === 'ACCOUNT_TIER')?.Value || 'UNKNOWN';
+        const textLimit = (spend as any).SpendLimits?.find((s: any) => s.Name === 'TEXT_MESSAGE_MONTHLY_SPEND_LIMIT');
+        const enforcedLimit = textLimit?.EnforcedLimit ?? null;
+        const phoneCount = (phones as any).PhoneNumbers?.length ?? 0;
+        const activePhones = (phones as any).PhoneNumbers?.filter((p: any) => p.Status === 'ACTIVE')?.length ?? 0;
+        const verifiedNums = (verified as any).VerifiedDestinationNumbers || [];
+        const verifiedActive = verifiedNums.filter((v: any) => v.Status === 'VERIFIED').length;
+        const verifiedPending = verifiedNums.filter((v: any) => v.Status === 'PENDING').length;
+
+        // Compare to last run for transition alerts
+        const prior = await getRuns('pinpoint-tier-watch').catch(() => []);
+        const lastTier = prior[0]?.data?.tier as string | undefined;
+        const lastLimit = prior[0]?.data?.enforcedLimit as number | null | undefined;
+        const lastVerifiedActive = prior[0]?.data?.verifiedActive as number | undefined;
+
+        // Alert 1: tier transition (the big one — SANDBOX → STANDARD = production access granted)
+        if (lastTier && lastTier !== tier) {
+          const isProd = tier === 'STANDARD' || tier === 'PRODUCTION';
+          await dispatchAlert({
+            id: `pinpoint-tier-${tier}`,
+            type: isProd ? 'info' : 'warning',
+            title: isProd
+              ? `🎉 Pinpoint approved! Tier flipped ${lastTier} → ${tier}`
+              : `Pinpoint tier changed: ${lastTier} → ${tier}`,
+            message: isProd
+              ? `End User Messaging SMS production access GRANTED. Twilio → Pinpoint migration unblocked. Current TEXT spend limit: $${enforcedLimit ?? '?'}/mo (request increase if too low).`
+              : `Tier moved unexpectedly. Investigate via AWS console → End User Messaging.`,
+            severity: isProd ? 'low' : 'medium',
+            source: 'Pinpoint tier watch',
+            action: isProd
+              ? 'Request spend-limit increase (default may still be $1/mo). Then start Phase 1 of Twilio→Pinpoint migration.'
+              : 'Open AWS console to investigate tier change',
+          }).catch(() => {});
+        }
+
+        // Alert 2: spend limit increased (good news — got more headroom)
+        if (lastLimit !== undefined && enforcedLimit !== null && lastLimit !== enforcedLimit) {
+          const increased = (enforcedLimit ?? 0) > (lastLimit ?? 0);
+          await dispatchAlert({
+            id: `pinpoint-spend-limit-${enforcedLimit}`,
+            type: 'info',
+            title: `Pinpoint TEXT spend limit ${increased ? 'increased' : 'changed'}: $${lastLimit} → $${enforcedLimit}/mo`,
+            message: `Your monthly SMS spend cap is now $${enforcedLimit}. ${increased ? 'You can send proportionally more SMS now.' : 'Investigate why it decreased.'}`,
+            severity: 'low',
+            source: 'Pinpoint tier watch',
+            action: 'No action needed unless this was unintentional',
+          }).catch(() => {});
+        }
+
+        // Alert 3: a pending destination got verified (sandbox testing unblocked)
+        if (lastVerifiedActive !== undefined && verifiedActive > lastVerifiedActive) {
+          await dispatchAlert({
+            id: `pinpoint-verified-${verifiedActive}`,
+            type: 'info',
+            title: `Pinpoint sandbox: ${verifiedActive - lastVerifiedActive} new destination(s) verified`,
+            message: `Now have ${verifiedActive} verified destination(s) for sandbox testing. ${verifiedPending > 0 ? `${verifiedPending} still pending.` : 'All verifications complete.'}`,
+            severity: 'low',
+            source: 'Pinpoint tier watch',
+            action: 'You can now test-send to the newly-verified number',
+          }).catch(() => {});
+        }
+
+        return {
+          ok: true,
+          message: `tier=${tier} · limit=$${enforcedLimit ?? '?'}/mo · ${activePhones}/${phoneCount} phone(s) ACTIVE · ${verifiedActive} verified destinations${verifiedPending > 0 ? ` (+${verifiedPending} pending)` : ''}`,
+          data: {
+            tier,
+            enforcedLimit,
+            phoneCount,
+            activePhones,
+            verifiedActive,
+            verifiedPending,
+            lastTier: lastTier || null,
+          },
+        };
+      } catch (err) {
+        return { ok: false, message: err instanceof Error ? err.message : 'Pinpoint check failed' };
+      }
+    },
+  },
+  {
     id: 'tfn-verification-watch',
     addedAt: '2026-04-21T00:00:00Z',
     group: 'monitoring',
