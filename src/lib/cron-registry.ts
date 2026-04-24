@@ -1261,14 +1261,34 @@ export const CRON_REGISTRY: CronDef[] = [
         const isBizHours =
           ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'].includes(etDay) && etHour >= 9 && etHour < 18;
 
-        const staleInBizHours =
-          isBizHours && newest && newest.ageHours !== null && newest.ageHours > 8;
-        const fullySilent = counts.last24h === 0 && counts.last7d > 0;
+        // Volume-aware thresholds. The original "0 in 24h, >0 in 7d" rule
+        // fires too often when weekly volume is low (e.g. 4 orders/week =
+        // 42h avg gap; 24h silence is normal). Instead:
+        //  - staleInBizHours: only meaningful if the site is active
+        //    enough (≥ 4 orders/7d) AND it's biz hours AND newest > 8h
+        //  - volumeSilence: alert when the current gap is > 3× the
+        //    average weekly gap AND > 24h AND weekly count ≥ 5 (otherwise
+        //    data too sparse to judge reliably)
+        const avgGapHours = counts.last7d > 0 ? (24 * 7) / counts.last7d : null;
+        const newestAgeHours = newest?.ageHours ?? null;
 
-        if (staleInBizHours || fullySilent) {
-          const reason = fullySilent
-            ? `zero webhooks in the last 24h (7d count: ${counts.last7d}). Has historically been healthy — something stopped arriving.`
-            : `newest webhook is ${newest?.ageHours}h old during business hours (${etDay} ${etHour}:00 ET).`;
+        const activeEnoughForBizCheck = counts.last7d >= 4;
+        const staleInBizHours =
+          activeEnoughForBizCheck &&
+          isBizHours &&
+          newestAgeHours !== null &&
+          newestAgeHours > 8;
+
+        const volumeSilence =
+          counts.last7d >= 5 &&
+          avgGapHours !== null &&
+          newestAgeHours !== null &&
+          newestAgeHours > Math.max(24, avgGapHours * 3);
+
+        if (staleInBizHours || volumeSilence) {
+          const reason = volumeSilence
+            ? `current gap ${newestAgeHours?.toFixed(1)}h vs avg ${avgGapHours?.toFixed(1)}h (${counts.last7d} paid in 7d) — 3× the normal cadence.`
+            : `newest paid order is ${newestAgeHours}h old during business hours (${etDay} ${etHour}:00 ET).`;
           await dispatchAlert({
             id: `stripe-liveness-silent-${new Date().toISOString().slice(0, 10)}`,
             type: 'error',
