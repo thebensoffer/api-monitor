@@ -20,6 +20,12 @@ export function middleware(request: NextRequest) {
     return new NextResponse('Unauthorized', { status: 401 });
   }
 
+  // GitHub Actions webhook self-authenticates via HMAC (x-openheart-sig). No
+  // monitor key required so we don't have to ship it to every workflow runner.
+  if (path.startsWith('/api/github-actions/webhook')) {
+    return NextResponse.next();
+  }
+
   // All other /api/* routes require monitor key.
   if (!monitorKey || monitorKey !== expectedMonitor) {
     return new NextResponse('Unauthorized', { status: 401 });
