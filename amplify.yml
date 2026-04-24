@@ -23,7 +23,8 @@ frontend:
                        NOTIFY_SLACK_WEBHOOK \
                        TWILIO_ACCOUNT_SID TWILIO_AUTH_TOKEN TWILIO_TFN_VERIFICATION_SID \
                        GITHUB_TOKEN OPENHEART_GITHUB_REPOS OPENHEART_S3_PUBLIC_ALLOWLIST \
-                       ANTHROPIC_API_KEY FIX_TOKEN_SECRET OPENHEART_AUTOPILOT; do
+                       ANTHROPIC_API_KEY FIX_TOKEN_SECRET OPENHEART_AUTOPILOT \
+                       DK_CRON_SECRET TOVANI_CRON_SECRET; do
               if [ -n "${!var}" ]; then echo "${var}=${!var}"; fi
             done
           } > .env.production

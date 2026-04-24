@@ -1093,6 +1093,217 @@ export const CRON_REGISTRY: CronDef[] = [
     },
   },
   {
+    id: 'aurora-canary-watchdog',
+    group: 'monitoring',
+    schedule: 'rate(1 hour)',
+    description:
+      'Hourly curl of /api/cron/db-canary on DK + Tovani. Each platform runs the canary from inside its own VPC-scoped SSR Lambda, proving end-to-end Aurora write path (insert + select + delete). Alerts HIGH on non-200, ok=false, or latency > 8s.',
+    handler: async () => {
+      const { dispatchAlert } = await import('@/lib/notify');
+
+      type Target = { platform: string; url: string; secret: string | undefined };
+      const targets: Target[] = [
+        {
+          platform: 'dk',
+          url: 'https://discreetketamine.com/api/cron/db-canary',
+          secret: process.env.DK_CRON_SECRET,
+        },
+        {
+          platform: 'tovani',
+          url: 'https://tovanihealth.com/api/cron/db-canary',
+          secret: process.env.TOVANI_CRON_SECRET,
+        },
+      ];
+
+      const TIMEOUT_MS = 8000;
+      const results: Array<{
+        platform: string;
+        ok: boolean;
+        status: number | null;
+        totalMs: number | null;
+        error?: string;
+        steps?: Record<string, unknown>;
+      }> = [];
+
+      for (const t of targets) {
+        if (!t.secret) {
+          results.push({
+            platform: t.platform,
+            ok: false,
+            status: null,
+            totalMs: null,
+            error: `${t.platform.toUpperCase()}_CRON_SECRET env var not set on openheart`,
+          });
+          continue;
+        }
+
+        const ctrl = new AbortController();
+        const timer = setTimeout(() => ctrl.abort(), TIMEOUT_MS);
+        const start = Date.now();
+        try {
+          const resp = await fetch(t.url, {
+            method: 'GET',
+            headers: { Authorization: `Bearer ${t.secret}` },
+            signal: ctrl.signal,
+            cache: 'no-store',
+          });
+          const totalMs = Date.now() - start;
+          const body: any = await resp.json().catch(() => ({}));
+          results.push({
+            platform: t.platform,
+            ok: resp.ok && body?.ok === true,
+            status: resp.status,
+            totalMs,
+            steps: body?.steps,
+            error: body?.error,
+          });
+        } catch (err: any) {
+          results.push({
+            platform: t.platform,
+            ok: false,
+            status: null,
+            totalMs: Date.now() - start,
+            error:
+              err?.name === 'AbortError'
+                ? `timeout after ${TIMEOUT_MS}ms`
+                : err?.message ?? 'fetch failed',
+          });
+        } finally {
+          clearTimeout(timer);
+        }
+      }
+
+      const failing = results.filter((r) => !r.ok);
+      if (failing.length > 0) {
+        const lines = failing.map(
+          (r) =>
+            `• ${r.platform}: HTTP ${r.status ?? 'n/a'} (${r.totalMs ?? '?'}ms)${r.error ? ' — ' + r.error : ''}`
+        );
+        await dispatchAlert({
+          id: `aurora-canary-${new Date().toISOString().slice(0, 13)}`,
+          type: 'error',
+          severity: 'high',
+          title: `Aurora write-path canary FAILING on ${failing.length} of ${results.length} platform${results.length > 1 ? 's' : ''}`,
+          message: lines.join('\n'),
+          source: 'aurora-canary-watchdog',
+          action:
+            'Check: Amplify deploys healthy, Aurora writer reachable, IAM policy on app role, disk % on cluster.',
+        }).catch((err) => console.error('[aurora-canary] dispatchAlert:', err?.message));
+      }
+
+      return {
+        ok: failing.length === 0,
+        message: `${results.length - failing.length}/${results.length} platforms healthy`,
+        data: { results },
+      };
+    },
+  },
+  {
+    id: 'stripe-webhook-liveness-watchdog',
+    group: 'monitoring',
+    schedule: 'rate(1 hour)',
+    description:
+      'Hourly check on DK Stripe webhook arrival rate. Curls /api/cron/stripe-webhook-liveness and alerts HIGH if no Stripe webhook has processed in the last 24h, or if the newest row is > 8h old during business hours (weekday 9am–6pm ET).',
+    handler: async () => {
+      const { dispatchAlert } = await import('@/lib/notify');
+
+      const secret = process.env.DK_CRON_SECRET;
+      if (!secret) {
+        return { ok: false, message: 'DK_CRON_SECRET not set' };
+      }
+
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 8000);
+      try {
+        const resp = await fetch(
+          'https://discreetketamine.com/api/cron/stripe-webhook-liveness',
+          {
+            method: 'GET',
+            headers: { Authorization: `Bearer ${secret}` },
+            signal: ctrl.signal,
+            cache: 'no-store',
+          }
+        );
+        if (!resp.ok) {
+          await dispatchAlert({
+            id: `stripe-liveness-endpoint-${new Date().toISOString().slice(0, 10)}`,
+            type: 'error',
+            severity: 'high',
+            title: `Stripe webhook liveness endpoint returned ${resp.status}`,
+            message: `DK /api/cron/stripe-webhook-liveness returned ${resp.status}. Can't assess webhook arrival rate.`,
+            source: 'stripe-webhook-liveness-watchdog',
+            action: 'Check DK Amplify deploy status + CRON_SECRET mismatch.',
+          }).catch(() => {});
+          return { ok: false, message: `endpoint ${resp.status}` };
+        }
+        const body: any = await resp.json();
+        const counts = body?.counts ?? {};
+        const newest = body?.newest ?? null;
+
+        // Biz hours heuristic: weekday Mon–Fri, 9–18 ET (13–22 UTC roughly).
+        // If we're inside biz hours and the newest row is > 8h old, alert.
+        // Otherwise we only alert on last24h=0 AND last7d>0 (proves the
+        // webhook has historically worked, just stopped).
+        const now = new Date();
+        const etHour = Number(
+          new Intl.DateTimeFormat('en-US', {
+            timeZone: 'America/New_York',
+            hour: '2-digit',
+            hour12: false,
+          })
+            .formatToParts(now)
+            .find((p) => p.type === 'hour')?.value ?? '0'
+        );
+        const etDay = new Intl.DateTimeFormat('en-US', {
+          timeZone: 'America/New_York',
+          weekday: 'short',
+        }).format(now); // "Mon" etc.
+        const isBizHours =
+          ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'].includes(etDay) && etHour >= 9 && etHour < 18;
+
+        const staleInBizHours =
+          isBizHours && newest && newest.ageHours !== null && newest.ageHours > 8;
+        const fullySilent = counts.last24h === 0 && counts.last7d > 0;
+
+        if (staleInBizHours || fullySilent) {
+          const reason = fullySilent
+            ? `zero webhooks in the last 24h (7d count: ${counts.last7d}). Has historically been healthy — something stopped arriving.`
+            : `newest webhook is ${newest?.ageHours}h old during business hours (${etDay} ${etHour}:00 ET).`;
+          await dispatchAlert({
+            id: `stripe-liveness-silent-${new Date().toISOString().slice(0, 10)}`,
+            type: 'error',
+            severity: 'high',
+            title: 'DK Stripe webhooks have gone silent',
+            message: [
+              reason,
+              `Counts: 1h=${counts.last1h ?? 0}, 24h=${counts.last24h ?? 0}, 7d=${counts.last7d ?? 0}.`,
+              newest ? `Newest: ${newest.processedAt} (${newest.ageHours}h ago).` : 'No webhooks on record.',
+            ].join('\n'),
+            source: 'stripe-webhook-liveness-watchdog',
+            action:
+              'Check: Stripe dashboard webhook delivery status, /api/stripe/webhook logs, STRIPE_WEBHOOK_SECRET rotation drift.',
+          }).catch(() => {});
+        }
+
+        return {
+          ok: !staleInBizHours && !fullySilent,
+          message: staleInBizHours
+            ? `ALERTED — newest ${newest?.ageHours}h old in biz hours`
+            : fullySilent
+              ? 'ALERTED — 24h=0, 7d>0'
+              : `${counts.last24h} in 24h${isBizHours ? ' (biz hours)' : ''}`,
+          data: { counts, newest, isBizHours, etDay, etHour },
+        };
+      } catch (err: any) {
+        const error = err?.name === 'AbortError' ? 'fetch timeout' : err?.message ?? 'fetch failed';
+        console.error('[stripe-liveness] fetch:', error);
+        return { ok: false, message: `fetch failed: ${error}` };
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+  },
+  {
     id: 'backup-verification',
     group: 'monitoring',
     schedule: 'cron(30 10 * * ? *)',
