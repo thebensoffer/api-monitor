@@ -1306,13 +1306,13 @@ export const CRON_REGISTRY: CronDef[] = [
         }
 
         return {
-          ok: !staleInBizHours && !fullySilent,
+          ok: !staleInBizHours && !volumeSilence,
           message: staleInBizHours
-            ? `ALERTED — newest ${newest?.ageHours}h old in biz hours`
-            : fullySilent
-              ? 'ALERTED — 24h=0, 7d>0'
-              : `${counts.last24h} in 24h${isBizHours ? ' (biz hours)' : ''}`,
-          data: { counts, newest, isBizHours, etDay, etHour },
+            ? `ALERTED — newest ${newestAgeHours}h old in biz hours`
+            : volumeSilence
+              ? `ALERTED — ${newestAgeHours?.toFixed(1)}h gap vs ${avgGapHours?.toFixed(1)}h avg`
+              : `${counts.last24h} in 24h${isBizHours ? ' (biz hours)' : ''}; 7d avg gap ${avgGapHours?.toFixed(1) ?? 'n/a'}h`,
+          data: { counts, newest, isBizHours, etDay, etHour, avgGapHours, newestAgeHours },
         };
       } catch (err: any) {
         const error = err?.name === 'AbortError' ? 'fetch timeout' : err?.message ?? 'fetch failed';
