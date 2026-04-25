@@ -70,12 +70,39 @@ function pctTone(pct: number) {
   return 'text-gray-400';
 }
 
+interface Insight {
+  priority: 'high' | 'medium' | 'low';
+  title: string;
+  recommendation: string;
+  reasoning: string;
+  category: 'content' | 'cro' | 'channel' | 'distribution' | 'measurement';
+}
+
 export function SeoAttributionPanel() {
   const [data, setData] = useState<any>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [days, setDays] = useState('90');
   const [siteFilter, setSiteFilter] = useState('all');
+
+  // AI insights state — independent fetch (slower, can fail without breaking the data view)
+  const [insights, setInsights] = useState<Insight[] | null>(null);
+  const [insightsLoading, setInsightsLoading] = useState(false);
+  const [insightsError, setInsightsError] = useState<string | null>(null);
+  const [insightsGeneratedAt, setInsightsGeneratedAt] = useState<string | null>(null);
+
+  const fetchInsights = (range: string) => {
+    setInsightsLoading(true);
+    setInsightsError(null);
+    fetch(`/api/seo-attribution/insights?days=${range}`, {
+      headers: { 'x-monitor-key': process.env.NEXT_PUBLIC_MONITOR_API_KEY || '' },
+      cache: 'no-store',
+    })
+      .then((r) => (r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`)))
+      .then((j) => { setInsights(j.insights || []); setInsightsGeneratedAt(j.generatedAt || null); })
+      .catch((e) => setInsightsError(String(e)))
+      .finally(() => setInsightsLoading(false));
+  };
 
   useEffect(() => {
     setLoading(true);
@@ -85,7 +112,7 @@ export function SeoAttributionPanel() {
       cache: 'no-store',
     })
       .then((r) => (r.ok ? r.json() : Promise.reject(`HTTP ${r.status}`)))
-      .then(setData)
+      .then((j) => { setData(j); fetchInsights(days); })
       .catch((e) => setError(String(e)))
       .finally(() => setLoading(false));
   }, [days]);
@@ -152,6 +179,81 @@ export function SeoAttributionPanel() {
           <KpiCard label="Revenue" value={`$${(summary.totalRevenueDollars).toLocaleString()}`} tone="emerald" />
           <KpiCard label="Elig → order" value={`${summary.eligibilityToOrderPct}%`} tone={summary.eligibilityToOrderPct >= 10 ? 'green' : 'yellow'} />
         </div>
+      </div>
+
+      {/* AI Interpretation — Bedrock Haiku reads the same data + suggests actions */}
+      <div className="bg-gradient-to-br from-purple-50 to-blue-50 border border-purple-200 shadow rounded-lg p-6">
+        <div className="flex items-center justify-between mb-3">
+          <div>
+            <h3 className="text-lg font-semibold flex items-center gap-2">
+              🤖 AI Interpretation
+              <span className="text-xs font-normal text-gray-500">
+                (Claude Haiku reads the data, returns prioritized actions)
+              </span>
+            </h3>
+            {insightsGeneratedAt && (
+              <p className="text-xs text-gray-500 mt-0.5">
+                Generated {new Date(insightsGeneratedAt).toLocaleString()}
+              </p>
+            )}
+          </div>
+          <button
+            onClick={() => fetchInsights(days)}
+            disabled={insightsLoading}
+            className="text-xs px-3 py-1 bg-white border border-purple-300 rounded hover:bg-purple-100 disabled:opacity-50"
+          >
+            {insightsLoading ? '⏳ Thinking…' : '🔄 Refresh'}
+          </button>
+        </div>
+
+        {insightsLoading && !insights && (
+          <div className="text-sm text-gray-500 italic">
+            Asking Claude to interpret the {data.pagesCombined?.length || 0} attributed pages and {data.sourcesAggregated?.length || 0} sources… (~5–10s)
+          </div>
+        )}
+        {insightsError && (
+          <div className="text-sm text-red-700">
+            Insights failed: {insightsError}. Data view below is unaffected.
+          </div>
+        )}
+        {insights && insights.length > 0 && (
+          <div className="space-y-3">
+            {insights.map((ins, i) => {
+              const prioStyles = {
+                high:   'border-red-300 bg-red-50 text-red-700',
+                medium: 'border-amber-300 bg-amber-50 text-amber-700',
+                low:    'border-gray-300 bg-gray-50 text-gray-700',
+              };
+              const catEmoji = {
+                content:      '✍️',
+                cro:          '🛠️',
+                channel:      '📡',
+                distribution: '📣',
+                measurement:  '📏',
+              };
+              return (
+                <div key={i} className="bg-white rounded-md border border-gray-200 p-4">
+                  <div className="flex items-start gap-3">
+                    <span className={`text-xs font-bold uppercase px-2 py-0.5 rounded border ${prioStyles[ins.priority]}`}>
+                      {ins.priority}
+                    </span>
+                    <span className="text-lg leading-none mt-0.5">{catEmoji[ins.category]}</span>
+                    <div className="flex-1 min-w-0">
+                      <div className="font-semibold text-gray-900">{ins.title}</div>
+                      <div className="text-sm text-gray-700 mt-1">{ins.recommendation}</div>
+                      <div className="text-xs text-gray-500 mt-1.5 italic">
+                        Why: {ins.reasoning}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+        {insights && insights.length === 0 && !insightsLoading && (
+          <div className="text-sm text-gray-500 italic">No insights returned.</div>
+        )}
       </div>
 
       {/* Top pages by revenue */}
