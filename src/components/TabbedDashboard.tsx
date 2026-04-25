@@ -22,6 +22,7 @@ import { PatientTimelinePanel } from './PatientTimelinePanel';
 import { SyntheticPanel } from './SyntheticPanel';
 import { SentryPanel } from './SentryPanel';
 import { IntegrityPanel } from './IntegrityPanel';
+import { SeoAttributionPanel } from './SeoAttributionPanel';
 
 interface ServiceStatus {
   key: string;
@@ -291,6 +292,7 @@ export function TabbedDashboard() {
     { id: 'integrity', name: 'Integrity', icon: '🧬' },
     { id: 'audit', name: 'Audit', icon: '📋' },
     { id: 'analytics', name: 'Analytics & Traffic', icon: '📈' },
+    { id: 'seo', name: 'SEO Attribution', icon: '🎯' },
   ];
   const tabsRow2 = [
     { id: 'performance', name: 'Performance', icon: '⚡' },
@@ -625,6 +627,10 @@ export function TabbedDashboard() {
 
       {activeTab === 'audit' && (
         <AuditPanel />
+      )}
+
+      {activeTab === 'seo' && (
+        <SeoAttributionPanel />
       )}
 
       {activeTab === 'flows' && (
