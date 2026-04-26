@@ -1324,6 +1324,195 @@ export const CRON_REGISTRY: CronDef[] = [
     },
   },
   {
+    id: 'drchrono-health-watchdog',
+    group: 'monitoring',
+    schedule: 'cron(0 12 * * ? *)', // 8 AM EDT / 7 AM EST daily
+    description:
+      'Daily DrChrono OAuth health check. Curls /api/cron/drchrono-health on DK; that endpoint walks every DrChronoIntegration, refreshes if needed, and pings GET /users/current to prove the token is actually accepted. Alerts HIGH if any integration is broken — the silent failure mode here is "patient appointments stop syncing" which today only surfaces reactively.',
+    handler: async () => {
+      const { dispatchAlert } = await import('@/lib/notify');
+
+      const secret = process.env.DK_CRON_SECRET;
+      if (!secret) {
+        return { ok: false, message: 'DK_CRON_SECRET not set on openheart' };
+      }
+
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 30_000);
+      try {
+        const resp = await fetch(
+          'https://discreetketamine.com/api/cron/drchrono-health',
+          {
+            method: 'GET',
+            headers: { Authorization: `Bearer ${secret}` },
+            signal: ctrl.signal,
+            cache: 'no-store',
+          }
+        );
+        const body: any = await resp.json().catch(() => ({}));
+        const integrations: Array<{
+          userEmail: string | null;
+          status: string;
+          apiHttpStatus: number | null;
+          hoursUntilExpiry: number;
+          error?: string;
+        }> = body?.integrations ?? [];
+
+        const broken = integrations.filter((i) => i.status !== 'healthy' && i.status !== 'refreshed');
+
+        if (broken.length > 0) {
+          const lines = broken.map(
+            (b) =>
+              `• ${b.userEmail ?? '?'} — ${b.status} (HTTP ${b.apiHttpStatus ?? 'n/a'}, expires in ${b.hoursUntilExpiry}h)${b.error ? ' — ' + b.error.slice(0, 100) : ''}`
+          );
+          await dispatchAlert({
+            id: `drchrono-broken-${new Date().toISOString().slice(0, 10)}`,
+            type: 'error',
+            severity: 'high',
+            title: `DrChrono integration BROKEN for ${broken.length} of ${integrations.length} prescriber${integrations.length === 1 ? '' : 's'}`,
+            message: lines.join('\n'),
+            source: 'drchrono-health-watchdog',
+            action:
+              'Check DrChrono dashboard → Authorized Apps. Re-run OAuth at /admin/settings if app was deauthorized. If refresh-token is dead, full re-auth is required.',
+          }).catch((err) => console.error('[drchrono-watchdog] dispatchAlert:', err?.message));
+        }
+
+        return {
+          ok: broken.length === 0 && resp.ok,
+          message: broken.length
+            ? `${broken.length}/${integrations.length} DrChrono integrations BROKEN`
+            : `${integrations.length}/${integrations.length} DrChrono integrations healthy`,
+          data: { integrations, broken: broken.length },
+        };
+      } catch (err: any) {
+        const error = err?.name === 'AbortError' ? 'fetch timeout' : err?.message ?? 'fetch failed';
+        return { ok: false, message: `fetch failed: ${error}` };
+      } finally {
+        clearTimeout(timer);
+      }
+    },
+  },
+  {
+    id: 'lambda-error-sweep',
+    group: 'monitoring',
+    schedule: 'cron(0 13 * * ? *)', // 9 AM EDT / 8 AM EST daily — after cron-liveness
+    description:
+      'Daily check on cron Lambda success rate. Sister to cron-liveness-watchdog: where that one asks "did it invoke", this asks "did it succeed". For each *-cron-* Lambda, pulls Errors + Invocations metrics over 24h. Alerts HIGH if errorRate > 20% with at least 3 invocations (avoids alerting on a single transient failure of an infrequent cron).',
+    handler: async () => {
+      const { LambdaClient, ListFunctionsCommand } = await import('@aws-sdk/client-lambda');
+      const { CloudWatchClient, GetMetricStatisticsCommand } = await import(
+        '@aws-sdk/client-cloudwatch'
+      );
+      const { dispatchAlert } = await import('@/lib/notify');
+
+      const accessKeyId =
+        process.env.OPENHEART_AWS_ACCESS_KEY_ID || process.env.AWS_ACCESS_KEY_ID;
+      const secretAccessKey =
+        process.env.OPENHEART_AWS_SECRET_ACCESS_KEY || process.env.AWS_SECRET_ACCESS_KEY;
+      if (!accessKeyId || !secretAccessKey) {
+        return { ok: false, message: 'AWS creds missing' };
+      }
+      const region = process.env.OPENHEART_AWS_REGION || 'us-east-1';
+      const credentials = { accessKeyId, secretAccessKey };
+      const lambda = new LambdaClient({ region, credentials });
+      const cw = new CloudWatchClient({ region, credentials });
+
+      // List every *-cron-* Lambda
+      const names: string[] = [];
+      let marker: string | undefined;
+      do {
+        const r = await lambda.send(
+          new ListFunctionsCommand({ Marker: marker, MaxItems: 50 })
+        );
+        for (const fn of r.Functions ?? []) {
+          if (
+            fn.FunctionName &&
+            /^(tovani|dk|drbensoffer|dbs|openheart)-cron-/.test(fn.FunctionName)
+          ) {
+            names.push(fn.FunctionName);
+          }
+        }
+        marker = r.NextMarker ?? undefined;
+      } while (marker);
+
+      const endTime = new Date();
+      const startTime = new Date(Date.now() - 24 * 3_600_000);
+      const checked: Array<{
+        fn: string;
+        invocations: number;
+        errors: number;
+        errorRate: number;
+      }> = [];
+      const failing: Array<{
+        fn: string;
+        invocations: number;
+        errors: number;
+        errorRate: number;
+      }> = [];
+
+      for (const fn of names) {
+        const dims = [{ Name: 'FunctionName', Value: fn }];
+        const [invR, errR] = await Promise.all([
+          cw.send(
+            new GetMetricStatisticsCommand({
+              Namespace: 'AWS/Lambda',
+              MetricName: 'Invocations',
+              Dimensions: dims,
+              StartTime: startTime,
+              EndTime: endTime,
+              Period: 86_400, // single 24h bucket
+              Statistics: ['Sum'],
+            })
+          ),
+          cw.send(
+            new GetMetricStatisticsCommand({
+              Namespace: 'AWS/Lambda',
+              MetricName: 'Errors',
+              Dimensions: dims,
+              StartTime: startTime,
+              EndTime: endTime,
+              Period: 86_400,
+              Statistics: ['Sum'],
+            })
+          ),
+        ]);
+        const invocations = (invR.Datapoints ?? []).reduce((s, d) => s + (d.Sum ?? 0), 0);
+        const errors = (errR.Datapoints ?? []).reduce((s, d) => s + (d.Sum ?? 0), 0);
+        const errorRate = invocations > 0 ? errors / invocations : 0;
+        const row = { fn, invocations, errors, errorRate };
+        checked.push(row);
+        // Alert criteria: at least 3 invocations + > 20% error rate.
+        // Below 3 invocations is too noisy to draw a conclusion.
+        if (invocations >= 3 && errorRate > 0.2) {
+          failing.push(row);
+        }
+      }
+
+      if (failing.length > 0) {
+        const lines = failing.map(
+          (f) =>
+            `• ${f.fn}: ${f.errors}/${f.invocations} errors (${(f.errorRate * 100).toFixed(0)}%)`
+        );
+        await dispatchAlert({
+          id: `lambda-errors-${new Date().toISOString().slice(0, 10)}`,
+          type: 'error',
+          severity: 'high',
+          title: `${failing.length} cron Lambda${failing.length > 1 ? 's' : ''} with > 20% error rate`,
+          message: lines.join('\n'),
+          source: 'lambda-error-sweep',
+          action:
+            'Check the failing Lambda logs in CloudWatch. Common causes: timeout, missing env var, downstream auth, schema drift.',
+        }).catch((err) => console.error('[lambda-error-sweep] dispatchAlert:', err?.message));
+      }
+
+      return {
+        ok: failing.length === 0,
+        message: `checked ${checked.length} Lambdas, ${failing.length} with > 20% error rate`,
+        data: { failing, checked: checked.length },
+      };
+    },
+  },
+  {
     id: 'backup-verification',
     group: 'monitoring',
     schedule: 'cron(30 10 * * ? *)',
