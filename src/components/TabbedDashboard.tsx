@@ -12,6 +12,7 @@ import { ServiceDrillRow } from './ServiceDrillRow';
 import { CronsPanel } from './CronsPanel';
 import { QuickLinks } from './QuickLinks';
 import { LiveOperationsCard } from './LiveOperationsCard';
+import { InboundSmsPanel } from './InboundSmsPanel';
 import { GscSiteCard } from './GscSiteCard';
 import { SentCommsPanel } from './SentCommsPanel';
 import { BuildsPanel } from './BuildsPanel';
@@ -562,6 +563,9 @@ export function TabbedDashboard() {
 
           {/* Live Operations — real GA4 + Amplify data, replaces former mock cards */}
           <LiveOperationsCard />
+
+          {/* Live patient texts — inbound SMS + AI/admin replies, auto-refresh 20s */}
+          <InboundSmsPanel />
 
           {/* Live alerts — driven by real probes */}
           {alerts && alerts.length > 0 && (
